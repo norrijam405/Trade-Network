@@ -63,3 +63,52 @@ def test_admin_decision_state_defaults_unknown():
     r = client.get("/api/admin/control-tower", headers=auth(admin))
     assert r.status_code == 200
     assert r.json()["decision_state"] == "UNKNOWN"
+
+
+def test_second_employer_cannot_see_or_accept_first_employer_intro():
+    worker = login("jordan")
+    owner2 = login("owner2")
+    intro = client.post("/api/intros", headers=auth(worker), json={"opportunity_id": "n2"}).json()
+    listed = client.get("/api/partner/intros", headers=auth(owner2))
+    assert listed.status_code == 200
+    assert listed.json()["items"] == []
+    accepted = client.post(f"/api/partner/intros/{intro['id']}/accept", headers=auth(owner2), json={})
+    assert accepted.status_code == 404
+
+def test_duplicate_meeting_proposal_is_suppressed():
+    worker = login("jordan")
+    owner = login("owner")
+    intro = client.post("/api/intros", headers=auth(worker), json={"opportunity_id": "n2"}).json()
+    conv = client.post(f"/api/partner/intros/{intro['id']}/accept", headers=auth(owner), json={}).json()["conversation"]
+    payload = {"conversation_id": conv["id"], "start_at": "Tomorrow 10:00 AM", "end_at": "Tomorrow 10:30 AM"}
+    a = client.post("/api/meetings", headers=auth(owner), json=payload)
+    b = client.post("/api/meetings", headers=auth(owner), json=payload)
+    assert a.status_code == 200
+    assert b.status_code == 200
+    assert a.json()["id"] == b.json()["id"]
+    assert len(runtime.namespace["MEETINGS"]) == 1
+
+def test_duplicate_customer_request_is_suppressed():
+    customer = login("customer")
+    payload = {
+        "service_category": "HVAC",
+        "description": "Fictional AC not cooling",
+        "location_text": "Oklahoma City",
+        "urgency": "THIS_WEEK",
+        "learner_preference": "NO_PREFERENCE",
+    }
+    a = client.post("/api/customer/requests", headers=auth(customer), json=payload)
+    b = client.post("/api/customer/requests", headers=auth(customer), json=payload)
+    assert a.status_code == 200
+    assert b.status_code == 200
+    assert a.json()["id"] == b.json()["id"]
+    assert len(runtime.namespace["CUSTOMER_REQUESTS"]) == 1
+
+def test_blank_message_is_rejected():
+    worker = login("jordan")
+    owner = login("owner")
+    intro = client.post("/api/intros", headers=auth(worker), json={"opportunity_id": "n2"}).json()
+    conv = client.post(f"/api/partner/intros/{intro['id']}/accept", headers=auth(owner), json={}).json()["conversation"]
+    r = client.post(f"/api/conversations/{conv['id']}/messages", headers=auth(worker), json={"body": "   "})
+    assert r.status_code == 422
+    assert len(runtime.namespace["MESSAGES"]) == 0
