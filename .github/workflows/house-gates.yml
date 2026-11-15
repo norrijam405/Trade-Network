@@ -34,4 +34,5 @@ jobs:
       - name: Run House wiring regression gates
         env:
           DATABASE_URL: ""
+          PYTHONPATH: "."
         run: pytest -q tests/test_r3_house_wiring.py
