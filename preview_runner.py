@@ -340,17 +340,23 @@ async def persist_successful_writes(request, call_next):
             response.headers["X-Trade-Network-Persistence"] = "error"
     return response
 
-@app.get("/api/persistence")
-def persistence_status():
+def _persistence_details():
     if not DATABASE_URL:
-        return JSONResponse({
+        return {
             "enabled": False,
             "ready": False,
             "mode": "memory-only",
-            "error": None
-        })
+            "updated_at": None,
+            "event_count": None,
+            "restart_count": None,
+            "first_seen_at": None,
+            "last_seen_at": None,
+            "house_selftest_ready": HOUSE_SELFTEST_READY,
+            "error": None,
+        }
     updated_at = None
     event_count = None
+    durability_row = None
     try:
         with _connect() as conn:
             with conn.cursor() as cur:
@@ -362,12 +368,18 @@ def persistence_status():
                 cur.execute("SELECT restart_count, first_seen_at, last_seen_at FROM trade_network_pilot_durability WHERE id = 1")
                 durability_row = cur.fetchone()
     except Exception as exc:
-        return JSONResponse({
+        return {
             "enabled": True,
             "ready": False,
             "mode": "postgres",
-            "error": f"{type(exc).__name__}: {exc}"
-        }, status_code=503)
+            "updated_at": None,
+            "event_count": None,
+            "restart_count": None,
+            "first_seen_at": None,
+            "last_seen_at": None,
+            "house_selftest_ready": HOUSE_SELFTEST_READY,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     return {
         "enabled": True,
         "ready": PERSISTENCE_READY,
@@ -378,5 +390,22 @@ def persistence_status():
         "first_seen_at": durability_row[1].isoformat() if durability_row and durability_row[1] else None,
         "last_seen_at": durability_row[2].isoformat() if durability_row and durability_row[2] else None,
         "house_selftest_ready": HOUSE_SELFTEST_READY,
-        "error": PERSISTENCE_ERROR
+        "error": PERSISTENCE_ERROR,
     }
+
+@app.get("/api/persistence")
+def persistence_status():
+    details = _persistence_details()
+    return {
+        "enabled": details["enabled"],
+        "ready": details["ready"],
+        "mode": details["mode"],
+        "house_selftest_ready": details["house_selftest_ready"],
+        "status": "READY" if details["ready"] else ("MEMORY_ONLY" if not details["enabled"] else "UNAVAILABLE"),
+    }
+
+@app.get("/api/admin/persistence")
+def admin_persistence_status(authorization: str | None = namespace["Header"](None)):
+    user = namespace["auth_header"](authorization)
+    namespace["require_role"](user, "ADMIN")
+    return _persistence_details()
