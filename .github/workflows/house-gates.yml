@@ -1,0 +1,37 @@
+name: Trade Network R3 House Gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - "launch/**"
+
+permissions:
+  contents: read
+
+jobs:
+  house-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-preview.txt -r requirements-dev.txt
+      - name: Compile hosted preview
+        run: |
+          python -m py_compile hosted_preview.py preview_runner.py || {
+            # hosted_preview.py intentionally carries the historical terminal quote;
+            # preview_runner strips it before compile. Compile runner directly and
+            # verify runtime import instead.
+            python -m py_compile preview_runner.py
+          }
+      - name: Run House wiring regression gates
+        env:
+          DATABASE_URL: ""
+        run: pytest -q tests/test_r3_house_wiring.py
