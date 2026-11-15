@@ -128,3 +128,27 @@ def test_logout_revokes_session():
     assert out.json()["ok"] is True
     r = client.get("/api/opportunities", headers=auth(worker))
     assert r.status_code == 401
+
+
+def test_public_persistence_status_is_minimized():
+    r = client.get("/api/persistence")
+    assert r.status_code == 200
+    body = r.json()
+    assert "event_count" not in body
+    assert "restart_count" not in body
+    assert "first_seen_at" not in body
+    assert "last_seen_at" not in body
+    assert set(body).issuperset({"enabled", "ready", "mode", "house_selftest_ready", "status"})
+
+def test_non_admin_cannot_read_detailed_persistence_status():
+    customer = login("customer")
+    r = client.get("/api/admin/persistence", headers=auth(customer))
+    assert r.status_code == 403
+
+def test_admin_can_read_detailed_persistence_status():
+    admin = login("admin")
+    r = client.get("/api/admin/persistence", headers=auth(admin))
+    assert r.status_code == 200
+    body = r.json()
+    assert "event_count" in body
+    assert "restart_count" in body
