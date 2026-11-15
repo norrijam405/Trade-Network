@@ -141,12 +141,168 @@ def _save_state(request, status_code):
             """, (request.method, request.url.path, actor, status_code))
         conn.commit()
 
+
+def _run_house_selftest():
+    ns = namespace
+    saved = {
+        "tokens": dict(ns["TOKENS"]),
+        "intros": list(ns["INTROS"]),
+        "conversations": list(ns["CONVERSATIONS"]),
+        "messages": list(ns["MESSAGES"]),
+        "meetings": list(ns["MEETINGS"]),
+        "customer_requests": list(ns["CUSTOMER_REQUESTS"]),
+    }
+    try:
+        ns["TOKENS"].clear()
+        ns["INTROS"].clear()
+        ns["CONVERSATIONS"].clear()
+        ns["MESSAGES"].clear()
+        ns["MEETINGS"].clear()
+        ns["CUSTOMER_REQUESTS"].clear()
+
+        ns["TOKENS"].update({
+            "t-worker": {"username":"jordan", **ns["USERS"]["jordan"]},
+            "t-owner": {"username":"owner", **ns["USERS"]["owner"]},
+            "t-owner2": {"username":"owner2", **ns["USERS"]["owner2"]},
+            "t-customer": {"username":"customer", **ns["USERS"]["customer"]},
+            "t-admin": {"username":"admin", **ns["USERS"]["admin"]},
+        })
+
+        failures = []
+
+        try:
+            ns["auth_header"]("Bearer invalid")
+            failures.append("invalid_session_not_rejected")
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 401:
+                failures.append("invalid_session_wrong_status")
+
+        intro1 = ns["create_intro"](ns["IntroBody"](opportunity_id="n2"), "Bearer t-worker")
+        intro2 = ns["create_intro"](ns["IntroBody"](opportunity_id="n2"), "Bearer t-worker")
+        if intro1["id"] != intro2["id"] or len(ns["INTROS"]) != 1:
+            failures.append("duplicate_intro")
+
+        if ns["partner_intros"]("Bearer t-owner2")["items"]:
+            failures.append("employer_isolation_list")
+        try:
+            ns["accept_intro"](intro1["id"], "Bearer t-owner2")
+            failures.append("employer_isolation_accept")
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 404:
+                failures.append("employer_isolation_accept_status")
+
+        accepted = ns["accept_intro"](intro1["id"], "Bearer t-owner")
+        conv = accepted["conversation"]
+
+        meeting_body = ns["MeetingBody"](
+            conversation_id=conv["id"],
+            start_at="Fictional Tomorrow 10:00 AM",
+            end_at="Fictional Tomorrow 10:30 AM",
+        )
+        meet1 = ns["create_meeting"](meeting_body, "Bearer t-owner")
+        meet2 = ns["create_meeting"](meeting_body, "Bearer t-owner")
+        if meet1["id"] != meet2["id"] or len(ns["MEETINGS"]) != 1:
+            failures.append("duplicate_meeting")
+
+        customer_body = ns["CustomerBody"](
+            service_category="HVAC",
+            description="Fictional duplicate guard",
+            location_text="Oklahoma City",
+            urgency="THIS_WEEK",
+            learner_preference="NO_PREFERENCE",
+        )
+        req1 = ns["customer_request"](customer_body, "Bearer t-customer")
+        req2 = ns["customer_request"](customer_body, "Bearer t-customer")
+        if req1["id"] != req2["id"] or len(ns["CUSTOMER_REQUESTS"]) != 1:
+            failures.append("duplicate_customer")
+
+        try:
+            ns["send_message"](conv["id"], ns["MessageBody"](body="   "), "Bearer t-worker")
+            failures.append("blank_message_not_rejected")
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 422:
+                failures.append("blank_message_wrong_status")
+
+        if ns["control_tower"]("Bearer t-admin")["decision_state"] != "UNKNOWN":
+            failures.append("admin_truth_state")
+
+        if failures:
+            print("HOUSE_SELFTEST FAIL", ",".join(failures))
+            return False
+        print("HOUSE_SELFTEST PASS checks=7")
+        return True
+    finally:
+        ns["TOKENS"].clear()
+        ns["TOKENS"].update(saved["tokens"])
+        for key, source in (
+            ("INTROS", saved["intros"]),
+            ("CONVERSATIONS", saved["conversations"]),
+            ("MESSAGES", saved["messages"]),
+            ("MEETINGS", saved["meetings"]),
+            ("CUSTOMER_REQUESTS", saved["customer_requests"]),
+        ):
+            ns[key].clear()
+            ns[key].extend(source)
+
+def _run_persistence_roundtrip():
+    if not DATABASE_URL:
+        return None
+    original = _snapshot()
+    marker = {
+        "id": "roundtrip-fictional",
+        "worker": "fictional-selftest",
+        "worker_name": "Fictional Selftest",
+        "opportunity_id": "n2",
+        "opportunity_title": "HVAC Trainee",
+        "employer": "owner",
+        "state": "PENDING",
+        "created_at": "SELFTEST",
+    }
+    try:
+        namespace["INTROS"].append(marker)
+        payload = json.dumps(_snapshot())
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO trade_network_pilot_state (id, payload, updated_at)
+                    VALUES (1, %s::jsonb, now())
+                    ON CONFLICT (id) DO UPDATE
+                    SET payload = EXCLUDED.payload, updated_at = now()
+                """, (payload,))
+            conn.commit()
+
+        for target in PERSISTED.values():
+            target.clear()
+        _load_state()
+        seen = any(x.get("id") == "roundtrip-fictional" for x in namespace["INTROS"])
+        if not seen:
+            raise RuntimeError("fictional roundtrip marker not restored")
+        print("PERSISTENCE_ROUNDTRIP PASS")
+        return True
+    finally:
+        for key, target in PERSISTED.items():
+            target.clear()
+            target.extend(original.get(key, []))
+        payload = json.dumps(original)
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO trade_network_pilot_state (id, payload, updated_at)
+                    VALUES (1, %s::jsonb, now())
+                    ON CONFLICT (id) DO UPDATE
+                    SET payload = EXCLUDED.payload, updated_at = now()
+                """, (payload,))
+            conn.commit()
+
+HOUSE_SELFTEST_READY = _run_house_selftest()
+
 PERSISTENCE_READY = False
 PERSISTENCE_ERROR = None
 if DATABASE_URL:
     try:
         _ensure_schema()
         _load_state()
+        _run_persistence_roundtrip()
         durability = _touch_durability_marker()
         if durability:
             print("PERSISTENCE_DURABILITY", f"restart_count={durability[0]}")
@@ -204,5 +360,6 @@ def persistence_status():
         "restart_count": durability_row[0] if durability_row else None,
         "first_seen_at": durability_row[1].isoformat() if durability_row and durability_row[1] else None,
         "last_seen_at": durability_row[2].isoformat() if durability_row and durability_row[2] else None,
+        "house_selftest_ready": HOUSE_SELFTEST_READY,
         "error": PERSISTENCE_ERROR
     }
