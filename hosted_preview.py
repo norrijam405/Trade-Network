@@ -310,4 +310,3 @@ def root():
 @app.get("/app", response_class=HTMLResponse)
 def app_page():
     return HTML
-"""
