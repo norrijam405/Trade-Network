@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
 import secrets
+import time
 from datetime import datetime, timezone
 
 app = FastAPI(title="Trade Network Hosted Preview R2")
@@ -15,6 +16,7 @@ USERS = {
     "admin": {"password": "TradeDemo123!", "role": "ADMIN", "name": "Demo Administrator"},
 }
 TOKENS = {}
+SESSION_TTL_SECONDS = 7200
 OPPORTUNITIES = [
     {"id":"n2","title":"HVAC Trainee","employer":"Red River Mechanical","pay":"Training wage","status":"OPEN NOW","will_train":True,"last_confirmed":"Today","fit":"Best Career Move","location":"Oklahoma City"},
     {"id":"n1","title":"Warehouse Helper","employer":"Red River Mechanical","pay":"$18/hr reported","status":"OPEN NOW","will_train":False,"last_confirmed":"Today","fit":"Fastest Money Move","location":"Oklahoma City"},
@@ -35,6 +37,10 @@ def auth_header(authorization: Optional[str]):
     user = TOKENS.get(token)
     if not user:
         raise HTTPException(401, "invalid session")
+    expires_at = user.get("expires_at")
+    if expires_at is not None and expires_at <= time.time():
+        TOKENS.pop(token, None)
+        raise HTTPException(401, "session expired")
     return user
 
 def require_role(user, role):
@@ -74,8 +80,16 @@ def login(body: LoginBody):
     if not u or body.password != u["password"]:
         raise HTTPException(401, "invalid credentials")
     token = secrets.token_urlsafe(24)
-    TOKENS[token] = {"username":key, **u}
-    return {"session_token":token,"user_id":key,"roles":[u["role"]],"name":u["name"]}
+    expires_at = time.time() + SESSION_TTL_SECONDS
+    TOKENS[token] = {"username":key, **u, "expires_at":expires_at}
+    return {"session_token":token,"user_id":key,"roles":[u["role"]],"name":u["name"],"expires_in":SESSION_TTL_SECONDS}
+
+@app.post("/api/logout")
+def logout(authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    token = authorization.split(" ", 1)[1]
+    TOKENS.pop(token, None)
+    return {"ok": True, "user_id": u["username"]}
 
 @app.get("/api/me")
 def me(authorization: Optional[str] = Header(None)):
