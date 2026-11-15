@@ -160,12 +160,13 @@ def _run_house_selftest():
         ns["MEETINGS"].clear()
         ns["CUSTOMER_REQUESTS"].clear()
 
+        expires = ns["time"].time() + 3600
         ns["TOKENS"].update({
-            "t-worker": {"username":"jordan", **ns["USERS"]["jordan"]},
-            "t-owner": {"username":"owner", **ns["USERS"]["owner"]},
-            "t-owner2": {"username":"owner2", **ns["USERS"]["owner2"]},
-            "t-customer": {"username":"customer", **ns["USERS"]["customer"]},
-            "t-admin": {"username":"admin", **ns["USERS"]["admin"]},
+            "t-worker": {"username":"jordan", **ns["USERS"]["jordan"], "expires_at": expires},
+            "t-owner": {"username":"owner", **ns["USERS"]["owner"], "expires_at": expires},
+            "t-owner2": {"username":"owner2", **ns["USERS"]["owner2"], "expires_at": expires},
+            "t-customer": {"username":"customer", **ns["USERS"]["customer"], "expires_at": expires},
+            "t-admin": {"username":"admin", **ns["USERS"]["admin"], "expires_at": expires},
         })
 
         failures = []
@@ -226,10 +227,26 @@ def _run_house_selftest():
         if ns["control_tower"]("Bearer t-admin")["decision_state"] != "UNKNOWN":
             failures.append("admin_truth_state")
 
+        ns["TOKENS"]["t-expired"] = {"username":"jordan", **ns["USERS"]["jordan"], "expires_at": 0}
+        try:
+            ns["auth_header"]("Bearer t-expired")
+            failures.append("expired_session_not_rejected")
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 401:
+                failures.append("expired_session_wrong_status")
+
+        ns["logout"]("Bearer t-worker")
+        try:
+            ns["auth_header"]("Bearer t-worker")
+            failures.append("revoked_session_not_rejected")
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 401:
+                failures.append("revoked_session_wrong_status")
+
         if failures:
             print("HOUSE_SELFTEST FAIL", ",".join(failures))
             return False
-        print("HOUSE_SELFTEST PASS checks=7")
+        print("HOUSE_SELFTEST PASS checks=9")
         return True
     finally:
         ns["TOKENS"].clear()
