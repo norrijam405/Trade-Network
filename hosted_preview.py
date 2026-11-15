@@ -10,6 +10,7 @@ app = FastAPI(title="Trade Network Hosted Preview R2")
 USERS = {
     "jordan": {"password": "TradeDemo123!", "role": "WORKER", "name": "Jordan Carter"},
     "owner": {"password": "TradeDemo123!", "role": "EMPLOYER", "name": "Red River Mechanical"},
+    "owner2": {"password": "TradeDemo123!", "role": "EMPLOYER", "name": "Fictional Second Employer"},
     "customer": {"password": "TradeDemo123!", "role": "CUSTOMER", "name": "Demo Customer"},
     "admin": {"password": "TradeDemo123!", "role": "ADMIN", "name": "Demo Administrator"},
 }
@@ -138,10 +139,13 @@ def get_messages(conversation_id: str, authorization: Optional[str] = Header(Non
 @app.post("/api/conversations/{conversation_id}/messages")
 def send_message(conversation_id: str, body: MessageBody, authorization: Optional[str] = Header(None)):
     u = auth_header(authorization)
+    clean_body = body.body.strip()
+    if not clean_body:
+        raise HTTPException(422, "message body required")
     c = next((x for x in CONVERSATIONS if x["id"]==conversation_id), None)
     if not c or u["username"] not in (c["worker"],c["employer"]):
         raise HTTPException(403, "conversation access denied")
-    m = {"id":f"msg-{len(MESSAGES)+1}","conversation_id":conversation_id,"sender":u["username"],"sender_name":u["name"],"body":body.body,"created_at":now()}
+    m = {"id":f"msg-{len(MESSAGES)+1}","conversation_id":conversation_id,"sender":u["username"],"sender_name":u["name"],"body":clean_body,"created_at":now()}
     MESSAGES.append(m)
     return m
 
@@ -151,6 +155,13 @@ def create_meeting(body: MeetingBody, authorization: Optional[str] = Header(None
     c = next((x for x in CONVERSATIONS if x["id"]==body.conversation_id), None)
     if not c or u["username"] not in (c["worker"],c["employer"]):
         raise HTTPException(403, "conversation access denied")
+    existing = next((m for m in MEETINGS
+                     if m["conversation_id"] == c["id"]
+                     and m["start_at"] == body.start_at
+                     and m["end_at"] == body.end_at
+                     and m["state"] in ("PROPOSED", "CONFIRMED")), None)
+    if existing:
+        return existing
     mt = {"id":f"meet-{len(MEETINGS)+1}","conversation_id":c["id"],"start_at":body.start_at,"end_at":body.end_at,"state":"PROPOSED","created_by":u["username"],"accepted_by":[]}
     MEETINGS.append(mt)
     return mt
@@ -181,6 +192,16 @@ def accept_meeting(meeting_id: str, authorization: Optional[str] = Header(None))
 def customer_request(body: CustomerBody, authorization: Optional[str] = Header(None)):
     u = auth_header(authorization)
     require_role(u, "CUSTOMER")
+    existing = next((x for x in CUSTOMER_REQUESTS
+                     if x["customer"] == u["username"]
+                     and x["service_category"] == body.service_category
+                     and x["description"] == body.description
+                     and x["location_text"] == body.location_text
+                     and x["urgency"] == body.urgency
+                     and x["learner_preference"] == body.learner_preference
+                     and x["state"] == "MATCHED"), None)
+    if existing:
+        return existing
     item = {"id":f"req-{len(CUSTOMER_REQUESTS)+1}","customer":u["username"],**body.model_dump(),"state":"MATCHED","matched_business":"Red River Mechanical","truth_state":"DEMO","created_at":now()}
     CUSTOMER_REQUESTS.append(item)
     return item
