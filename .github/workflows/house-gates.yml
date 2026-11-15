@@ -23,15 +23,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-preview.txt -r requirements-dev.txt
-      - name: Compile hosted preview
+      - name: Compile and import hosted runtime
+        env:
+          DATABASE_URL: ""
+          PYTHONPATH: .
         run: |
-          python -m py_compile hosted_preview.py preview_runner.py || {
-            # hosted_preview.py intentionally carries the historical terminal quote;
-            # preview_runner strips it before compile. Compile runner directly and
-            # verify runtime import instead.
-            python -m py_compile preview_runner.py
-          }
+          python -m py_compile preview_runner.py
+          python -c "import preview_runner; assert preview_runner.HOUSE_SELFTEST_READY is True; print('runtime-import-pass')"
       - name: Run House wiring regression gates
         env:
           DATABASE_URL: ""
-        run: pytest -q tests/test_r3_house_wiring.py
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_r3_house_wiring.py
