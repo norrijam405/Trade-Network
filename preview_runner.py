@@ -69,7 +69,33 @@ def _ensure_schema():
                     status_code integer NOT NULL
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS trade_network_pilot_durability (
+                    id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                    marker text NOT NULL,
+                    restart_count integer NOT NULL DEFAULT 0,
+                    first_seen_at timestamptz NOT NULL DEFAULT now(),
+                    last_seen_at timestamptz NOT NULL DEFAULT now()
+                )
+            """)
         conn.commit()
+
+def _touch_durability_marker():
+    if not DATABASE_URL:
+        return None
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO trade_network_pilot_durability (id, marker, restart_count, first_seen_at, last_seen_at)
+                VALUES (1, 'FICTIONAL_R3_DURABILITY_SENTINEL', 1, now(), now())
+                ON CONFLICT (id) DO UPDATE
+                SET restart_count = trade_network_pilot_durability.restart_count + 1,
+                    last_seen_at = now()
+                RETURNING restart_count, first_seen_at, last_seen_at
+            """)
+            row = cur.fetchone()
+        conn.commit()
+    return row
 
 def _load_state():
     if not DATABASE_URL:
@@ -121,6 +147,9 @@ if DATABASE_URL:
     try:
         _ensure_schema()
         _load_state()
+        durability = _touch_durability_marker()
+        if durability:
+            print("PERSISTENCE_DURABILITY", f"restart_count={durability[0]}")
         PERSISTENCE_READY = True
     except Exception as exc:
         PERSISTENCE_ERROR = f"{type(exc).__name__}: {exc}"
@@ -157,6 +186,8 @@ def persistence_status():
                 updated_at = row[0].isoformat() if row and row[0] else None
                 cur.execute("SELECT count(*) FROM trade_network_pilot_events")
                 event_count = cur.fetchone()[0]
+                cur.execute("SELECT restart_count, first_seen_at, last_seen_at FROM trade_network_pilot_durability WHERE id = 1")
+                durability_row = cur.fetchone()
     except Exception as exc:
         return JSONResponse({
             "enabled": True,
@@ -170,5 +201,8 @@ def persistence_status():
         "mode": "postgres",
         "updated_at": updated_at,
         "event_count": event_count,
+        "restart_count": durability_row[0] if durability_row else None,
+        "first_seen_at": durability_row[1].isoformat() if durability_row and durability_row[1] else None,
+        "last_seen_at": durability_row[2].isoformat() if durability_row and durability_row[2] else None,
         "error": PERSISTENCE_ERROR
     }
