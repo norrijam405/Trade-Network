@@ -112,3 +112,19 @@ def test_blank_message_is_rejected():
     r = client.post(f"/api/conversations/{conv['id']}/messages", headers=auth(worker), json={"body": "   "})
     assert r.status_code == 422
     assert len(runtime.namespace["MESSAGES"]) == 0
+
+
+def test_expired_session_is_rejected_and_removed():
+    worker = login("jordan")
+    runtime.namespace["TOKENS"][worker]["expires_at"] = 0
+    r = client.get("/api/opportunities", headers=auth(worker))
+    assert r.status_code == 401
+    assert worker not in runtime.namespace["TOKENS"]
+
+def test_logout_revokes_session():
+    worker = login("jordan")
+    out = client.post("/api/logout", headers=auth(worker), json={})
+    assert out.status_code == 200
+    assert out.json()["ok"] is True
+    r = client.get("/api/opportunities", headers=auth(worker))
+    assert r.status_code == 401
