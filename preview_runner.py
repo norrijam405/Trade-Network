@@ -36,6 +36,7 @@ namespace["HTML"] = html
 
 app = namespace["app"]
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+NEON_STANDBY_URL = os.getenv("NEON_STANDBY_URL", "").strip()
 PERSISTED = {
     "intros": namespace["INTROS"],
     "conversations": namespace["CONVERSATIONS"],
@@ -313,6 +314,39 @@ def _run_persistence_roundtrip():
 
 HOUSE_SELFTEST_READY = _run_house_selftest()
 
+def _check_neon_standby():
+    if not NEON_STANDBY_URL:
+        print("NEON_STANDBY DISABLED")
+        return {"enabled": False, "ready": False, "provider": "neon"}
+    try:
+        with psycopg.connect(NEON_STANDBY_URL, connect_timeout=8) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT payload->>'migration_probe'
+                    FROM trade_network_pilot_state
+                    WHERE id = 1
+                """)
+                row = cur.fetchone()
+                if not row or row[0] != "FICTIONAL_NEON_R3":
+                    raise RuntimeError("fictional migration probe missing")
+                cur.execute("""
+                    UPDATE trade_network_pilot_durability
+                    SET restart_count = restart_count + 1,
+                        last_seen_at = now()
+                    WHERE id = 1
+                    RETURNING restart_count
+                """)
+                durability = cur.fetchone()
+            conn.commit()
+        restart_count = durability[0] if durability else None
+        print("NEON_STANDBY PASS", f"restart_count={restart_count}")
+        return {"enabled": True, "ready": True, "provider": "neon", "restart_count": restart_count}
+    except Exception as exc:
+        print("NEON_STANDBY FAIL", type(exc).__name__)
+        return {"enabled": True, "ready": False, "provider": "neon", "error": type(exc).__name__}
+
+NEON_STANDBY_STATUS = _check_neon_standby()
+
 PERSISTENCE_READY = False
 PERSISTENCE_ERROR = None
 if DATABASE_URL:
@@ -409,3 +443,16 @@ def admin_persistence_status(authorization: str | None = namespace["Header"](Non
     user = namespace["auth_header"](authorization)
     namespace["require_role"](user, "ADMIN")
     return _persistence_details()
+
+
+@app.get("/api/admin/standby")
+def admin_standby_status(authorization: str | None = namespace["Header"](None)):
+    user = namespace["auth_header"](authorization)
+    namespace["require_role"](user, "ADMIN")
+    return {
+        "enabled": NEON_STANDBY_STATUS.get("enabled", False),
+        "ready": NEON_STANDBY_STATUS.get("ready", False),
+        "provider": NEON_STANDBY_STATUS.get("provider", "neon"),
+        "restart_count": NEON_STANDBY_STATUS.get("restart_count"),
+        "error": NEON_STANDBY_STATUS.get("error"),
+    }
