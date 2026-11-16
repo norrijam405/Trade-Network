@@ -1,78 +1,75 @@
 # Trade Network R3 — Verified Plumbing Receipt
 
-Date: 2026-11-15
+Date: 2026-11-15 / 2026-11-16 UTC
 
-## Exact source and deployment
+## Current exact runtime
 - Repository: `norrijam405/Trade-Network`
 - Branch: `launch/r2-hosted-preview`
-- Current verified runtime source SHA: `371d1aa126769d4eb2bb2df66333679d7c1c1e6f`
 - Draft PR: #2
-- Render service: `trade-network-r3-persistent-preview-c4pa`
-- Service ID: `srv-dbsstvoae00c739055g0`
-- Exact deploy: `dep-dbt4b7e7bikc73d0nd30`
+- Runtime SHA: `bad4ab74be36dc2e63c0347c9ad0dc764452a1fd`
+- Render service: `srv-dbsstvoae00c739055g0`
+- Current exact deploy: `dep-dbt7kau1egvs73fldip0`
 - URL: https://trade-network-r3-persistent-preview-c4pa.onrender.com
-- Render status: **LIVE**
-- Public GET /: **200**
-- Repeated /health checks: **200**
+- Status: **LIVE**
 
 ## Exact-head CI
-GitHub Actions workflow: **Trade Network R3 House Gates**
-- Exact-head run for persistence telemetry gate: `43777045898`
-- Result: **COMPLETED / SUCCESS**
-- Earlier exact-head session-hardening run: `43776859138` **SUCCESS**
-- Syntax-clean runtime run: `43776683050` **SUCCESS**
+GitHub Actions:
+- workflow: `Trade Network R3 House Gates`
+- run `43798936562`
+- conclusion: **SUCCESS**
 
-Current gates cover:
-- invalid session fails closed,
-- wrong role cannot access Worker data,
-- duplicate intro suppression,
-- second fictional employer isolation,
-- duplicate meeting suppression,
-- duplicate customer-request suppression,
-- blank-message rejection,
-- Admin decision state remains `UNKNOWN`,
-- expired session rejection/removal,
-- logout/session revocation,
-- anonymous persistence telemetry minimization,
-- Customer denied detailed persistence telemetry,
-- Admin permitted detailed persistence telemetry.
+Current regression gates include session failure/expiry/revocation, RBAC, employer isolation, duplicate suppression, blank-message rejection, Admin UNKNOWN truth state, minimized public persistence telemetry and Admin-only detailed persistence/standby status.
 
-## Deployed startup receipts
-At current exact deployed SHA:
+## Current deployed receipts
 - `HOUSE_SELFTEST PASS checks=9`
+- **`NEON_STANDBY PASS restart_count=3`**
 - `PERSISTENCE_ROUNDTRIP PASS`
-- `PERSISTENCE_DURABILITY restart_count=6`
+- **primary Render `PERSISTENCE_DURABILITY restart_count=12`**
+- repeated `/health` 200
+- public `GET /` 200
 
-Earlier redeploys advanced the same database-backed sentinel through restart counts 1 -> 2 -> 3 -> 4 -> 5 -> 6 across real process replacements.
+## Database portability
+An isolated Neon project/branch is now independently exercised by the real FastAPI + psycopg runtime:
+- Neon project: `Trade Network Pilot`
+- project ID: `snowy-scene-84184020`
+- rehearsal branch: `br-snowy-cherry-bcplj5ld`
+- database: `trade_network`
 
-## Verified plumbing claims
-The following are now evidence-backed for the isolated fictional R3 preview:
-1. Web service connects to isolated Render Postgres without exposing the credential.
-2. Application state snapshot can be written to Postgres, cleared from memory, restored from Postgres and then restored to its original snapshot.
-3. Database-backed durability metadata survives repeated service replacements/redeploys.
-4. Current authorization, isolation and duplicate guards pass GitHub CI and startup self-test.
-5. Demo sessions have a two-hour TTL and explicit logout revocation.
-6. Anonymous persistence status exposes coarse readiness only; detailed operational persistence metadata requires the Admin role.
-7. Historical invalid Python terminal marker was removed; current source is syntactically valid without runtime repair.
+Neon main was read-only during rehearsal. The rehearsal branch contains fictional migration state only.
 
-## Infrastructure deadline
-Current free Render Postgres database:
-- ID: `dpg-dbssg2t6e07s73aop74g-a`
-- expires: **2026-12-15**
-- recommended permanent-database migration target: **on or before 2026-12-08**
+The app verified the fictional migration marker and advanced Neon durability to 3 while primary Render Postgres remained healthy.
 
-The database external allowlist remains empty. It was **not** weakened for inspection.
+**Current evidence supports: DATABASE PORTABILITY TO NEON = VERIFIED for isolated fictional pilot use.**
+
+It does **not** support production migration or web-host independence yet.
+
+## Current web-host blocker
+Vercel Hobby/free is the preferred first Render-free FastAPI target because current Vercel Python/FastAPI hosting uses standard CPython and minimizes application rewrite.
+
+However the connected Vercel account currently returns HTTP 403 for project creation. Full Render-free web hosting is therefore **BLOCKED ON EXTERNAL VERCEL PROJECT-CREATE AUTHORITY**.
+
+Cloudflare remains an alternate lane, but moving the current psycopg persistence path there would require more adapter/runtime work.
+
+## Temporary Render database deadline
+Current primary free Render DB:
+`dpg-dbssg2t6e07s73aop74g-a`
+
+Expiration: **2026-12-15**
+Migration target: **on or before 2026-12-08**
+
+Because Neon portability is now proven, the database-expiry risk has been materially reduced; an exact primary cutover and rollback rehearsal are still required before switching.
 
 ## Still NOT verified / not production
-- Real-user multi-tenant penetration/security testing.
-- Durable idempotency under concurrent multi-instance writes.
-- Independent backup artifact -> restore drill.
-- Retention/deletion implementation.
-- Production authentication/MFA/passkeys/recovery.
-- Real employer/job/customer data.
-- Real job feed/provider integrations.
-- Cost Layer 2.0 enforcement in Trade Network.
-- Credential/licensing/hour authority.
-- Production readiness or production merge.
+- real-user multi-tenant penetration testing,
+- concurrent/multi-instance atomic idempotency,
+- independent backup artifact -> restore drill,
+- retention/deletion implementation,
+- production auth/MFA/passkeys/recovery,
+- real employer/job/customer data,
+- real provider/job feeds,
+- Render-free web deployment,
+- Cost Layer 2.0 enforcement,
+- credential/licensing/hour authority,
+- production readiness or production merge.
 
-No real customer data, paid infrastructure, production merge, permission mutation, external database allowlist change, or credential exposure was used for these receipts.
+No real customer data, paid infrastructure, production merge, credential disclosure or consequential employment automation was used.
