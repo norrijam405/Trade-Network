@@ -152,3 +152,18 @@ def test_admin_can_read_detailed_persistence_status():
     body = r.json()
     assert "event_count" in body
     assert "restart_count" in body
+
+
+def test_non_admin_cannot_read_standby_status():
+    customer = login("customer")
+    r = client.get("/api/admin/standby", headers=auth(customer))
+    assert r.status_code == 403
+
+def test_admin_can_read_standby_status_without_secret_in_ci():
+    admin = login("admin")
+    r = client.get("/api/admin/standby", headers=auth(admin))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider"] == "neon"
+    assert "url" not in body
+    assert "password" not in body
