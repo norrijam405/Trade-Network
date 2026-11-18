@@ -167,3 +167,111 @@ def test_admin_can_read_standby_status_without_secret_in_ci():
     assert body["provider"] == "neon"
     assert "url" not in body
     assert "password" not in body
+
+
+def test_worker_next_action_progresses_through_real_journey():
+    worker = login("jordan")
+    owner = login("owner")
+
+    r = client.get("/api/next-action", headers=auth(worker))
+    assert r.status_code == 200
+    assert r.json()["code"] == "REQUEST_INTRO"
+
+    intro = client.post("/api/intros", headers=auth(worker), json={"opportunity_id": "n2"}).json()
+    r = client.get("/api/next-action", headers=auth(worker))
+    assert r.json()["code"] == "WAIT_FOR_EMPLOYER"
+
+    accepted = client.post(f"/api/partner/intros/{intro['id']}/accept", headers=auth(owner), json={})
+    assert accepted.status_code == 200
+    conv = accepted.json()["conversation"]
+
+    r = client.get("/api/next-action", headers=auth(worker))
+    assert r.json()["code"] == "SEND_FIRST_MESSAGE"
+
+    msg = client.post(
+        f"/api/conversations/{conv['id']}/messages",
+        headers=auth(worker),
+        json={"body": "Fictional hello"},
+    )
+    assert msg.status_code == 200
+    r = client.get("/api/next-action", headers=auth(worker))
+    assert r.json()["code"] == "WAIT_FOR_INTERVIEW"
+
+    proposed = client.post(
+        "/api/meetings",
+        headers=auth(owner),
+        json={
+            "conversation_id": conv["id"],
+            "start_at": "Tomorrow 10:00 AM",
+            "end_at": "Tomorrow 10:30 AM",
+        },
+    )
+    assert proposed.status_code == 200
+    r = client.get("/api/next-action", headers=auth(worker))
+    assert r.json()["code"] == "ACCEPT_INTERVIEW"
+
+    accepted_meeting = client.post(
+        f"/api/meetings/{proposed.json()['id']}/accept",
+        headers=auth(worker),
+        json={},
+    )
+    assert accepted_meeting.status_code == 200
+    assert accepted_meeting.json()["state"] == "CONFIRMED"
+
+    r = client.get("/api/next-action", headers=auth(worker))
+    assert r.json()["code"] == "PREPARE_INTERVIEW"
+
+
+def test_employer_next_action_progresses_through_real_journey():
+    worker = login("jordan")
+    owner = login("owner")
+
+    r = client.get("/api/next-action", headers=auth(owner))
+    assert r.status_code == 200
+    assert r.json()["code"] == "WAIT_FOR_INTRO"
+
+    intro = client.post("/api/intros", headers=auth(worker), json={"opportunity_id": "n2"}).json()
+    r = client.get("/api/next-action", headers=auth(owner))
+    assert r.json()["code"] == "REVIEW_INTRO"
+
+    accepted = client.post(f"/api/partner/intros/{intro['id']}/accept", headers=auth(owner), json={}).json()
+    conv = accepted["conversation"]
+
+    r = client.get("/api/next-action", headers=auth(owner))
+    assert r.json()["code"] == "SEND_FIRST_MESSAGE"
+
+    client.post(
+        f"/api/conversations/{conv['id']}/messages",
+        headers=auth(owner),
+        json={"body": "Fictional employer message"},
+    )
+    r = client.get("/api/next-action", headers=auth(owner))
+    assert r.json()["code"] == "PROPOSE_INTERVIEW"
+
+    proposed = client.post(
+        "/api/meetings",
+        headers=auth(owner),
+        json={
+            "conversation_id": conv["id"],
+            "start_at": "Tomorrow 10:00 AM",
+            "end_at": "Tomorrow 10:30 AM",
+        },
+    )
+    assert proposed.status_code == 200
+    r = client.get("/api/next-action", headers=auth(owner))
+    assert r.json()["code"] == "WAIT_FOR_WORKER_CONFIRMATION"
+
+    client.post(
+        f"/api/meetings/{proposed.json()['id']}/accept",
+        headers=auth(worker),
+        json={},
+    )
+    r = client.get("/api/next-action", headers=auth(owner))
+    assert r.json()["code"] == "PREPARE_INTERVIEW"
+
+
+def test_customer_and_admin_cannot_use_worker_employer_next_action():
+    customer = login("customer")
+    admin = login("admin")
+    assert client.get("/api/next-action", headers=auth(customer)).status_code == 403
+    assert client.get("/api/next-action", headers=auth(admin)).status_code == 403
