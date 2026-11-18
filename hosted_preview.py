@@ -47,6 +47,123 @@ def require_role(user, role):
     if user["role"] != role:
         raise HTTPException(403, f"role denied: {role}")
 
+def _worker_next_action(username):
+    worker_intros = [x for x in INTROS if x["worker"] == username]
+    if not worker_intros:
+        return {
+            "code": "REQUEST_INTRO",
+            "title": "Request an introduction",
+            "detail": "Pick the opportunity that best matches what you need next.",
+            "stage": "DISCOVER",
+        }
+
+    accepted = [x for x in worker_intros if x["state"] == "ACCEPTED"]
+    if not accepted:
+        return {
+            "code": "WAIT_FOR_EMPLOYER",
+            "title": "Employer review in progress",
+            "detail": "Your introduction is waiting on the employer. You do not need to submit it again.",
+            "stage": "INTRO_PENDING",
+        }
+
+    conv_ids = {c["id"] for c in CONVERSATIONS if c["worker"] == username}
+    worker_meetings = [m for m in MEETINGS if m["conversation_id"] in conv_ids]
+    proposed = [m for m in worker_meetings if m["state"] == "PROPOSED"]
+    if proposed:
+        return {
+            "code": "ACCEPT_INTERVIEW",
+            "title": "Accept your interview",
+            "detail": f"{proposed[0]['start_at']} is waiting for your confirmation.",
+            "stage": "MEETING_PROPOSED",
+        }
+
+    confirmed = [m for m in worker_meetings if m["state"] == "CONFIRMED"]
+    if confirmed:
+        return {
+            "code": "PREPARE_INTERVIEW",
+            "title": "Prepare for your confirmed interview",
+            "detail": f"Interview confirmed for {confirmed[0]['start_at']}.",
+            "stage": "MEETING_CONFIRMED",
+        }
+
+    worker_messages = [m for m in MESSAGES if m["conversation_id"] in conv_ids and m["sender"] == username]
+    if not worker_messages:
+        return {
+            "code": "SEND_FIRST_MESSAGE",
+            "title": "Send your first message",
+            "detail": "Your introduction was accepted. Start the conversation with the employer.",
+            "stage": "CONVERSATION_OPEN",
+        }
+
+    return {
+        "code": "WAIT_FOR_INTERVIEW",
+        "title": "Keep the conversation moving",
+        "detail": "You have contacted the employer. Watch for an interview proposal or reply.",
+        "stage": "CONVERSATION_ACTIVE",
+    }
+
+def _employer_next_action(username):
+    pending = [x for x in INTROS if x["employer"] == username and x["state"] == "PENDING"]
+    if pending:
+        return {
+            "code": "REVIEW_INTRO",
+            "title": "Review a worker introduction",
+            "detail": f"{pending[0]['worker_name']} is waiting for your decision.",
+            "stage": "INTRO_PENDING",
+        }
+
+    conv_ids = {c["id"] for c in CONVERSATIONS if c["employer"] == username}
+    if not conv_ids:
+        return {
+            "code": "WAIT_FOR_INTRO",
+            "title": "No worker action needed right now",
+            "detail": "New worker introductions will appear here when they are requested.",
+            "stage": "IDLE",
+        }
+
+    employer_meetings = [m for m in MEETINGS if m["conversation_id"] in conv_ids]
+    if any(m["state"] == "CONFIRMED" for m in employer_meetings):
+        m = next(m for m in employer_meetings if m["state"] == "CONFIRMED")
+        return {
+            "code": "PREPARE_INTERVIEW",
+            "title": "Prepare for the confirmed interview",
+            "detail": f"Interview confirmed for {m['start_at']}.",
+            "stage": "MEETING_CONFIRMED",
+        }
+
+    if any(m["state"] == "PROPOSED" for m in employer_meetings):
+        return {
+            "code": "WAIT_FOR_WORKER_CONFIRMATION",
+            "title": "Interview proposal sent",
+            "detail": "The worker still needs to accept the interview time.",
+            "stage": "MEETING_PROPOSED",
+        }
+
+    employer_messages = [m for m in MESSAGES if m["conversation_id"] in conv_ids and m["sender"] == username]
+    if not employer_messages:
+        return {
+            "code": "SEND_FIRST_MESSAGE",
+            "title": "Message the worker",
+            "detail": "The introduction is accepted. Start the conversation before proposing an interview.",
+            "stage": "CONVERSATION_OPEN",
+        }
+
+    return {
+        "code": "PROPOSE_INTERVIEW",
+        "title": "Propose an interview",
+        "detail": "The conversation is active. Move the worker to a real next step.",
+        "stage": "CONVERSATION_ACTIVE",
+    }
+
+@app.get("/api/next-action")
+def next_action(authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    if u["role"] == "WORKER":
+        return _worker_next_action(u["username"])
+    if u["role"] == "EMPLOYER":
+        return _employer_next_action(u["username"])
+    raise HTTPException(403, "next action not available for role")
+
 class LoginBody(BaseModel):
     identifier: str
     password: str
@@ -275,6 +392,7 @@ input,textarea,select{width:100%;padding:12px 13px;border:1px solid #d9d2c8;bord
 <section id="worker" class="card hidden">
 <h2>Jordan Carter</h2><p class="muted">Aspiring HVAC Technician · Oklahoma City</p>
 <div class="row"><span class="pill gold">I need work this week</span><span class="pill green">45% career progress</span></div>
+<h3 style="margin-top:22px">What should I do next?</h3><div id="worker-next" class="item"></div>
 <h3 style="margin-top:22px">Opportunity Reality</h3><div id="opps"></div>
 <h3 style="margin-top:22px">Messages & schedule</h3><div id="worker-conv" class="item muted">No accepted introduction yet.</div>
 <div id="worker-meetings"></div>
@@ -282,6 +400,7 @@ input,textarea,select{width:100%;padding:12px 13px;border:1px solid #d9d2c8;bord
 <section id="employer" class="card hidden">
 <h2>Red River Mechanical</h2><p class="muted">Employer development portal</p>
 <div class="row"><span class="pill green">First Opportunity Partner</span><span class="pill blue">Will train</span></div>
+<h3 style="margin-top:22px">What should I do next?</h3><div id="employer-next" class="item"></div>
 <h3 style="margin-top:22px">Introduction requests</h3><div id="employer-intros"></div>
 <h3 style="margin-top:22px">Conversation</h3><div id="employer-conv" class="item muted">Accept an introduction to unlock messaging.</div>
 </section>
@@ -303,15 +422,16 @@ input,textarea,select{width:100%;padding:12px 13px;border:1px solid #d9d2c8;bord
 let token=null,role=null,user=null;
 async function api(path,opt={}){opt.headers={...(opt.headers||{}),"Content-Type":"application/json"};if(token)opt.headers.Authorization="Bearer "+token;const r=await fetch(path,opt);let b={};try{b=await r.json()}catch{}if(!r.ok)throw new Error(b.detail||("HTTP "+r.status));return b}
 function show(id){["worker","employer","customer","admin"].forEach(x=>document.getElementById(x).classList.add("hidden"));document.getElementById(id).classList.remove("hidden");["worker","employer","customer","admin"].forEach(x=>document.getElementById("nav-"+x).classList.remove("active"));document.getElementById("nav-"+id).classList.add("active")}
+async function loadNext(target){const n=await api("/api/next-action");document.getElementById(target).innerHTML='<strong>'+n.title+'</strong><div class="muted">'+n.detail+'</div><div style="margin-top:10px"><span class="pill blue">'+n.stage.replaceAll("_"," ")+'</span></div>'}
 async function loginAs(name){try{const b=await api("/api/login",{method:"POST",body:JSON.stringify({identifier:name,password:"TradeDemo123!"})});token=b.session_token;role=b.roles[0];user=name;document.getElementById("session").innerHTML="<strong>"+b.name+"</strong><br>"+role;const map={WORKER:"worker",EMPLOYER:"employer",CUSTOMER:"customer",ADMIN:"admin"};show(map[role]);if(role==="WORKER")loadWorker();if(role==="EMPLOYER")loadEmployer();if(role==="ADMIN")loadAdmin()}catch(e){document.getElementById("session").textContent=e.message}}
-async function loadWorker(){const b=await api("/api/opportunities");document.getElementById("opps").innerHTML=b.items.map(o=>'<div class="item"><div class="row"><span class="pill '+(o.will_train?'green':'blue')+'">'+o.status+'</span><span class="pill">'+o.last_confirmed+'</span></div><strong>'+o.title+'</strong><div class="muted">'+o.employer+' · '+o.location+' · '+o.pay+'</div><div style="margin-top:10px"><span class="pill gold">'+o.fit+'</span></div><button class="btn" onclick="requestIntro(\''+o.id+'\')">Request introduction</button></div>').join("");await loadWorkerConv()}
-async function requestIntro(id){try{const b=await api("/api/intros",{method:"POST",body:JSON.stringify({opportunity_id:id})});alert("Introduction "+b.state);await loadWorkerConv()}catch(e){alert(e.message)}}
+async function loadWorker(){await loadNext("worker-next");const b=await api("/api/opportunities");document.getElementById("opps").innerHTML=b.items.map(o=>'<div class="item"><div class="row"><span class="pill '+(o.will_train?'green':'blue')+'">'+o.status+'</span><span class="pill">'+o.last_confirmed+'</span></div><strong>'+o.title+'</strong><div class="muted">'+o.employer+' · '+o.location+' · '+o.pay+'</div><div style="margin-top:10px"><span class="pill gold">'+o.fit+'</span></div><button class="btn" onclick="requestIntro(\''+o.id+'\')">Request introduction</button></div>').join("");await loadWorkerConv()}
+async function requestIntro(id){try{const b=await api("/api/intros",{method:"POST",body:JSON.stringify({opportunity_id:id})});alert("Introduction "+b.state);await loadNext("worker-next");await loadWorkerConv()}catch(e){alert(e.message)}}
 async function loadWorkerConv(){const c=await api("/api/conversations");const box=document.getElementById("worker-conv");if(!c.items.length){box.className="item muted";box.textContent="No accepted introduction yet.";return}const conv=c.items[0];const msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation unlocked</strong>"+msgs.items.map(m=>"<p><b>"+m.sender_name+":</b> "+m.body+"</p>").join("")+'<input id="wm" placeholder="Write a message"><button class="btn" onclick="sendMsg(\''+conv.id+'\',\'wm\')">Send</button>';const mt=await api("/api/meetings");document.getElementById("worker-meetings").innerHTML=mt.items.map(m=>'<div class="item"><strong>Interview · '+m.state+'</strong><div class="muted">'+m.start_at+'</div>'+(m.state!=="CONFIRMED"?'<button class="btn green" onclick="acceptMeeting(\''+m.id+'\')">Accept interview</button>':'')+'</div>').join("")}
-async function loadEmployer(){const b=await api("/api/partner/intros");document.getElementById("employer-intros").innerHTML=b.items.length?b.items.map(i=>'<div class="item"><strong>'+i.worker_name+'</strong><div class="muted">'+i.opportunity_title+' · '+i.state+'</div>'+(i.state==="PENDING"?'<button class="btn green" onclick="acceptIntro(\''+i.id+'\')">Accept introduction</button>':'')+'</div>').join(""):'<div class="item muted">No introduction requests yet. Switch to Worker and request one.</div>';const c=await api("/api/conversations");const box=document.getElementById("employer-conv");if(c.items.length){const conv=c.items[0],msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation open</strong>"+msgs.items.map(m=>"<p><b>"+m.sender_name+":</b> "+m.body+"</p>").join("")+'<input id="em" placeholder="Message Jordan"><button class="btn" onclick="sendMsg(\''+conv.id+'\',\'em\')">Send</button><button class="btn gold" onclick="proposeMeeting(\''+conv.id+'\')">Propose interview</button>'}}
+async function loadEmployer(){await loadNext("employer-next");const b=await api("/api/partner/intros");document.getElementById("employer-intros").innerHTML=b.items.length?b.items.map(i=>'<div class="item"><strong>'+i.worker_name+'</strong><div class="muted">'+i.opportunity_title+' · '+i.state+'</div>'+(i.state==="PENDING"?'<button class="btn green" onclick="acceptIntro(\''+i.id+'\')">Accept introduction</button>':'')+'</div>').join(""):'<div class="item muted">No introduction requests yet. Switch to Worker and request one.</div>';const c=await api("/api/conversations");const box=document.getElementById("employer-conv");if(c.items.length){const conv=c.items[0],msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation open</strong>"+msgs.items.map(m=>"<p><b>"+m.sender_name+":</b> "+m.body+"</p>").join("")+'<input id="em" placeholder="Message Jordan"><button class="btn" onclick="sendMsg(\''+conv.id+'\',\'em\')">Send</button><button class="btn gold" onclick="proposeMeeting(\''+conv.id+'\')">Propose interview</button>'}}
 async function acceptIntro(id){await api("/api/partner/intros/"+id+"/accept",{method:"POST",body:"{}"});await loadEmployer()}
-async function sendMsg(conv,input){const el=document.getElementById(input);if(!el.value)return;await api("/api/conversations/"+conv+"/messages",{method:"POST",body:JSON.stringify({body:el.value})});if(role==="WORKER")loadWorkerConv();else loadEmployer()}
-async function proposeMeeting(conv){await api("/api/meetings",{method:"POST",body:JSON.stringify({conversation_id:conv,start_at:"Tomorrow 10:00 AM",end_at:"Tomorrow 10:30 AM"})});alert("Interview proposed")}
-async function acceptMeeting(id){await api("/api/meetings/"+id+"/accept",{method:"POST",body:"{}"});await loadWorkerConv()}
+async function sendMsg(conv,input){const el=document.getElementById(input);if(!el.value)return;await api("/api/conversations/"+conv+"/messages",{method:"POST",body:JSON.stringify({body:el.value})});if(role==="WORKER"){await loadNext("worker-next");loadWorkerConv()}else{await loadNext("employer-next");loadEmployer()}}
+async function proposeMeeting(conv){await api("/api/meetings",{method:"POST",body:JSON.stringify({conversation_id:conv,start_at:"Tomorrow 10:00 AM",end_at:"Tomorrow 10:30 AM"})});await loadNext("employer-next");alert("Interview proposed")}
+async function acceptMeeting(id){await api("/api/meetings/"+id+"/accept",{method:"POST",body:"{}"});await loadNext("worker-next");await loadWorkerConv()}
 async function submitCustomer(){const b=await api("/api/customer/requests",{method:"POST",body:JSON.stringify({service_category:document.getElementById("service").value,description:document.getElementById("desc").value,location_text:document.getElementById("loc").value})});document.getElementById("customer-status").innerHTML='<div class="item"><strong>'+b.state+'</strong><div class="muted">Matched business: '+b.matched_business+'</div><span class="pill blue">'+b.truth_state+'</span></div>'}
 async function loadAdmin(){const b=await api("/api/admin/control-tower");document.getElementById("metrics").innerHTML=Object.entries(b.counts).map(([k,v])=>'<div class="item"><div class="metric">'+v+'</div><div class="muted">'+k.replaceAll("_"," ")+'</div></div>').join("")}
 loginAs("jordan");
