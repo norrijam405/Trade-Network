@@ -275,3 +275,62 @@ def test_customer_and_admin_cannot_use_worker_employer_next_action():
     admin = login("admin")
     assert client.get("/api/next-action", headers=auth(customer)).status_code == 403
     assert client.get("/api/next-action", headers=auth(admin)).status_code == 403
+
+
+def test_worker_journey_receipt_is_role_scoped_and_authority_bounded():
+    worker = login("jordan")
+    owner = login("owner")
+
+    denied = client.get("/api/worker/journey-receipt", headers=auth(owner))
+    assert denied.status_code == 403
+
+    empty = client.get("/api/worker/journey-receipt", headers=auth(worker))
+    assert empty.status_code == 200
+    body = empty.json()
+    assert body["receipt_type"] == "CAREER_JOURNEY_ACTIVITY"
+    assert body["evidence_scope"] == "PLATFORM_RECORDED_ACTIVITY_ONLY"
+    assert body["authority_state"] == "UNKNOWN"
+    assert body["qualifying_hours_authority"] == "NONE"
+    assert body["credential_acceptance_authority"] == "NONE"
+    assert body["events"] == []
+    text = str(body).lower()
+    assert "credential" in text
+    assert "regulator acceptance" in text
+
+def test_worker_journey_receipt_records_platform_activity_without_overclaiming():
+    worker = login("jordan")
+    owner = login("owner")
+
+    intro = client.post("/api/intros", headers=auth(worker), json={"opportunity_id": "n2"}).json()
+    accepted = client.post(f"/api/partner/intros/{intro['id']}/accept", headers=auth(owner), json={}).json()
+    conv = accepted["conversation"]
+
+    client.post(
+        f"/api/conversations/{conv['id']}/messages",
+        headers=auth(worker),
+        json={"body": "Fictional worker message"},
+    )
+
+    meeting = client.post(
+        "/api/meetings",
+        headers=auth(owner),
+        json={
+            "conversation_id": conv["id"],
+            "start_at": "Tomorrow 10:00 AM",
+            "end_at": "Tomorrow 10:30 AM",
+        },
+    ).json()
+
+    client.post(f"/api/meetings/{meeting['id']}/accept", headers=auth(worker), json={})
+
+    receipt = client.get("/api/worker/journey-receipt", headers=auth(worker))
+    assert receipt.status_code == 200
+    body = receipt.json()
+    event_types = {e["event_type"] for e in body["events"]}
+    assert "INTRO_REQUESTED" in event_types
+    assert "INTRO_ACCEPTED" in event_types
+    assert "WORKER_MESSAGE_SENT" in event_types
+    assert "INTERVIEW_CONFIRMED" in event_types
+    assert all(e["truth_state"] == "SUPPORTED" for e in body["events"])
+    assert body["current_stage"] == "MEETING_CONFIRMED"
+    assert body["authority_state"] == "UNKNOWN"
