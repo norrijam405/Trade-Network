@@ -164,6 +164,69 @@ def next_action(authorization: Optional[str] = Header(None)):
         return _employer_next_action(u["username"])
     raise HTTPException(403, "next action not available for role")
 
+def _worker_journey_receipt(username):
+    next_state = _worker_next_action(username)
+    worker_intros = [x for x in INTROS if x["worker"] == username]
+    conv_ids = {c["id"] for c in CONVERSATIONS if c["worker"] == username}
+    worker_messages = [m for m in MESSAGES if m["conversation_id"] in conv_ids and m["sender"] == username]
+    worker_meetings = [m for m in MEETINGS if m["conversation_id"] in conv_ids]
+
+    events = []
+    for intro in worker_intros:
+        events.append({
+            "event_type": "INTRO_REQUESTED",
+            "state": intro["state"],
+            "reference": intro["id"],
+            "recorded_at": intro.get("created_at"),
+            "truth_state": "SUPPORTED",
+        })
+        if intro["state"] == "ACCEPTED":
+            events.append({
+                "event_type": "INTRO_ACCEPTED",
+                "state": "ACCEPTED",
+                "reference": intro["id"],
+                "recorded_at": intro.get("created_at"),
+                "truth_state": "SUPPORTED",
+            })
+
+    for message in worker_messages:
+        events.append({
+            "event_type": "WORKER_MESSAGE_SENT",
+            "state": "RECORDED",
+            "reference": message["id"],
+            "recorded_at": message.get("created_at"),
+            "truth_state": "SUPPORTED",
+        })
+
+    for meeting in worker_meetings:
+        events.append({
+            "event_type": "INTERVIEW_" + meeting["state"],
+            "state": meeting["state"],
+            "reference": meeting["id"],
+            "recorded_at": meeting.get("start_at"),
+            "truth_state": "SUPPORTED",
+        })
+
+    return {
+        "receipt_type": "CAREER_JOURNEY_ACTIVITY",
+        "worker_id": username,
+        "generated_at": now(),
+        "current_stage": next_state["stage"],
+        "next_action_code": next_state["code"],
+        "events": events,
+        "evidence_scope": "PLATFORM_RECORDED_ACTIVITY_ONLY",
+        "authority_state": "UNKNOWN",
+        "qualifying_hours_authority": "NONE",
+        "credential_acceptance_authority": "NONE",
+        "disclaimer": "This receipt records fictional pilot activity inside Trade Network. It is not a credential, license, qualifying-hours decision, employment verification, or regulator acceptance.",
+    }
+
+@app.get("/api/worker/journey-receipt")
+def worker_journey_receipt(authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    require_role(u, "WORKER")
+    return _worker_journey_receipt(u["username"])
+
 class LoginBody(BaseModel):
     identifier: str
     password: str
@@ -396,6 +459,7 @@ input,textarea,select{width:100%;padding:12px 13px;border:1px solid #d9d2c8;bord
 <h3 style="margin-top:22px">Opportunity Reality</h3><div id="opps"></div>
 <h3 style="margin-top:22px">Messages & schedule</h3><div id="worker-conv" class="item muted">No accepted introduction yet.</div>
 <div id="worker-meetings"></div>
+<h3 style="margin-top:22px">My journey receipt</h3><div id="worker-receipt" class="item muted">Platform-recorded activity will appear here.</div>
 </section>
 <section id="employer" class="card hidden">
 <h2>Red River Mechanical</h2><p class="muted">Employer development portal</p>
@@ -422,14 +486,15 @@ input,textarea,select{width:100%;padding:12px 13px;border:1px solid #d9d2c8;bord
 let token=null,role=null,user=null;
 async function api(path,opt={}){opt.headers={...(opt.headers||{}),"Content-Type":"application/json"};if(token)opt.headers.Authorization="Bearer "+token;const r=await fetch(path,opt);let b={};try{b=await r.json()}catch{}if(!r.ok)throw new Error(b.detail||("HTTP "+r.status));return b}
 function show(id){["worker","employer","customer","admin"].forEach(x=>document.getElementById(x).classList.add("hidden"));document.getElementById(id).classList.remove("hidden");["worker","employer","customer","admin"].forEach(x=>document.getElementById("nav-"+x).classList.remove("active"));document.getElementById("nav-"+id).classList.add("active")}
+async function loadWorkerReceipt(){const r=await api("/api/worker/journey-receipt");const box=document.getElementById("worker-receipt");const events=r.events||[];box.className="item";box.innerHTML='<div class="row"><span class="pill blue">'+r.evidence_scope.replaceAll("_"," ")+'</span><span class="pill">Authority '+r.authority_state+'</span></div><strong>'+events.length+' recorded milestone'+(events.length===1?'':'s')+'</strong><div class="muted" style="margin-top:8px">'+(events.length?events.map(e=>e.event_type.replaceAll("_"," ")+' · '+e.state).join("<br>"):'No journey events recorded yet.')+'</div><div class="muted" style="margin-top:10px;font-size:13px">Not a credential, license, qualifying-hours decision, or regulator acceptance.</div>'}
 async function loadNext(target){const n=await api("/api/next-action");document.getElementById(target).innerHTML='<strong>'+n.title+'</strong><div class="muted">'+n.detail+'</div><div style="margin-top:10px"><span class="pill blue">'+n.stage.replaceAll("_"," ")+'</span></div>'}
 async function loginAs(name){try{const b=await api("/api/login",{method:"POST",body:JSON.stringify({identifier:name,password:"TradeDemo123!"})});token=b.session_token;role=b.roles[0];user=name;document.getElementById("session").innerHTML="<strong>"+b.name+"</strong><br>"+role;const map={WORKER:"worker",EMPLOYER:"employer",CUSTOMER:"customer",ADMIN:"admin"};show(map[role]);if(role==="WORKER")loadWorker();if(role==="EMPLOYER")loadEmployer();if(role==="ADMIN")loadAdmin()}catch(e){document.getElementById("session").textContent=e.message}}
-async function loadWorker(){await loadNext("worker-next");const b=await api("/api/opportunities");document.getElementById("opps").innerHTML=b.items.map(o=>'<div class="item"><div class="row"><span class="pill '+(o.will_train?'green':'blue')+'">'+o.status+'</span><span class="pill">'+o.last_confirmed+'</span></div><strong>'+o.title+'</strong><div class="muted">'+o.employer+' · '+o.location+' · '+o.pay+'</div><div style="margin-top:10px"><span class="pill gold">'+o.fit+'</span></div><button class="btn" onclick="requestIntro(\''+o.id+'\')">Request introduction</button></div>').join("");await loadWorkerConv()}
-async function requestIntro(id){try{const b=await api("/api/intros",{method:"POST",body:JSON.stringify({opportunity_id:id})});alert("Introduction "+b.state);await loadNext("worker-next");await loadWorkerConv()}catch(e){alert(e.message)}}
+async function loadWorker(){await loadNext("worker-next");await loadWorkerReceipt();const b=await api("/api/opportunities");document.getElementById("opps").innerHTML=b.items.map(o=>'<div class="item"><div class="row"><span class="pill '+(o.will_train?'green':'blue')+'">'+o.status+'</span><span class="pill">'+o.last_confirmed+'</span></div><strong>'+o.title+'</strong><div class="muted">'+o.employer+' · '+o.location+' · '+o.pay+'</div><div style="margin-top:10px"><span class="pill gold">'+o.fit+'</span></div><button class="btn" onclick="requestIntro(\''+o.id+'\')">Request introduction</button></div>').join("");await loadWorkerConv()}
+async function requestIntro(id){try{const b=await api("/api/intros",{method:"POST",body:JSON.stringify({opportunity_id:id})});alert("Introduction "+b.state);await loadNext("worker-next");await loadWorkerReceipt();await loadWorkerConv()}catch(e){alert(e.message)}}
 async function loadWorkerConv(){const c=await api("/api/conversations");const box=document.getElementById("worker-conv");if(!c.items.length){box.className="item muted";box.textContent="No accepted introduction yet.";return}const conv=c.items[0];const msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation unlocked</strong>"+msgs.items.map(m=>"<p><b>"+m.sender_name+":</b> "+m.body+"</p>").join("")+'<input id="wm" placeholder="Write a message"><button class="btn" onclick="sendMsg(\''+conv.id+'\',\'wm\')">Send</button>';const mt=await api("/api/meetings");document.getElementById("worker-meetings").innerHTML=mt.items.map(m=>'<div class="item"><strong>Interview · '+m.state+'</strong><div class="muted">'+m.start_at+'</div>'+(m.state!=="CONFIRMED"?'<button class="btn green" onclick="acceptMeeting(\''+m.id+'\')">Accept interview</button>':'')+'</div>').join("")}
 async function loadEmployer(){await loadNext("employer-next");const b=await api("/api/partner/intros");document.getElementById("employer-intros").innerHTML=b.items.length?b.items.map(i=>'<div class="item"><strong>'+i.worker_name+'</strong><div class="muted">'+i.opportunity_title+' · '+i.state+'</div>'+(i.state==="PENDING"?'<button class="btn green" onclick="acceptIntro(\''+i.id+'\')">Accept introduction</button>':'')+'</div>').join(""):'<div class="item muted">No introduction requests yet. Switch to Worker and request one.</div>';const c=await api("/api/conversations");const box=document.getElementById("employer-conv");if(c.items.length){const conv=c.items[0],msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation open</strong>"+msgs.items.map(m=>"<p><b>"+m.sender_name+":</b> "+m.body+"</p>").join("")+'<input id="em" placeholder="Message Jordan"><button class="btn" onclick="sendMsg(\''+conv.id+'\',\'em\')">Send</button><button class="btn gold" onclick="proposeMeeting(\''+conv.id+'\')">Propose interview</button>'}}
 async function acceptIntro(id){await api("/api/partner/intros/"+id+"/accept",{method:"POST",body:"{}"});await loadEmployer()}
-async function sendMsg(conv,input){const el=document.getElementById(input);if(!el.value)return;await api("/api/conversations/"+conv+"/messages",{method:"POST",body:JSON.stringify({body:el.value})});if(role==="WORKER"){await loadNext("worker-next");loadWorkerConv()}else{await loadNext("employer-next");loadEmployer()}}
+async function sendMsg(conv,input){const el=document.getElementById(input);if(!el.value)return;await api("/api/conversations/"+conv+"/messages",{method:"POST",body:JSON.stringify({body:el.value})});if(role==="WORKER"){await loadNext("worker-next");await loadWorkerReceipt();loadWorkerConv()}else{await loadNext("employer-next");loadEmployer()}}
 async function proposeMeeting(conv){await api("/api/meetings",{method:"POST",body:JSON.stringify({conversation_id:conv,start_at:"Tomorrow 10:00 AM",end_at:"Tomorrow 10:30 AM"})});await loadNext("employer-next");alert("Interview proposed")}
 async function acceptMeeting(id){await api("/api/meetings/"+id+"/accept",{method:"POST",body:"{}"});await loadNext("worker-next");await loadWorkerConv()}
 async function submitCustomer(){const b=await api("/api/customer/requests",{method:"POST",body:JSON.stringify({service_category:document.getElementById("service").value,description:document.getElementById("desc").value,location_text:document.getElementById("loc").value})});document.getElementById("customer-status").innerHTML='<div class="item"><strong>'+b.state+'</strong><div class="muted">Matched business: '+b.matched_business+'</div><span class="pill blue">'+b.truth_state+'</span></div>'}
