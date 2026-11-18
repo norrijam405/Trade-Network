@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: trade-network-r1-preview
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: false
