@@ -1,0 +1,52 @@
+name: Trade Network R3 House Gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - "launch/**"
+
+permissions:
+  contents: read
+
+jobs:
+  house-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-preview.txt -r requirements-dev.txt
+      - name: Compile and import hosted runtime
+        env:
+          DATABASE_URL: ""
+          PYTHONPATH: .
+        run: |
+          python -m py_compile preview_runner.py
+          python -c "import preview_runner; assert preview_runner.HOUSE_SELFTEST_READY is True; print('runtime-import-pass')"
+      - name: Run House wiring regression gates
+        env:
+          DATABASE_URL: ""
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_r3_house_wiring.py
+
+      - name: Build and boot portable R3 container
+        run: |
+          docker build -t trade-network-r3:ci .
+          cid="$(docker run -d -p 127.0.0.1:18000:8000 trade-network-r3:ci)"
+          trap 'docker logs "$cid" || true; docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/health >/dev/null; then
+              echo "container-health-pass"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container-health-fail"
+          exit 1
