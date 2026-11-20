@@ -89,10 +89,55 @@ def _worker_next_action(username):
 
     confirmed = [m for m in worker_meetings if m["state"] == "CONFIRMED"]
     if confirmed:
+        meeting = confirmed[0]
+        outcome = meeting.get("employer_outcome")
+        response = meeting.get("worker_outcome_response")
+        if outcome:
+            if response and response.get("response") == "DISPUTE":
+                return {
+                    "code": "OUTCOME_DISPUTED",
+                    "title": "Your interview outcome is disputed",
+                    "detail": "The employer report and your response are both retained. This is not a public label or verified employment record. You can continue the conversation or request support.",
+                    "stage": "OUTCOME_REVIEW",
+                }
+            if not response:
+                return {
+                    "code": "REVIEW_INTERVIEW_OUTCOME",
+                    "title": "Review the employer's interview update",
+                    "detail": f"Employer-reported outcome: {outcome['status'].replace('_', ' ').lower()}. You can acknowledge it or dispute it.",
+                    "stage": "OUTCOME_REVIEW",
+                }
+            if outcome["status"] == "NOT_SELECTED":
+                return {
+                    "code": "NO_DEAD_END_NEXT_STEP",
+                    "title": "Keep moving toward your next opportunity",
+                    "detail": "The employer reported that you were not selected. That is not a permanent label. Request support or choose another opportunity.",
+                    "stage": "NEXT_OPPORTUNITY",
+                }
+            if outcome["status"] == "OFFER_RECEIVED":
+                return {
+                    "code": "REVIEW_OFFER_DETAILS",
+                    "title": "Review the offer details directly",
+                    "detail": "The employer reported an offer. Confirm the terms directly with them; this is not employment verification.",
+                    "stage": "OFFER_REVIEW",
+                }
+            if outcome["status"] == "FOLLOW_UP":
+                return {
+                    "code": "WAIT_FOR_EMPLOYER_FOLLOWUP",
+                    "title": "Employer follow-up is pending",
+                    "detail": "The employer reported that another update is coming. Keep the conversation open.",
+                    "stage": "FOLLOWUP_PENDING",
+                }
+            return {
+                "code": "COORDINATE_NEXT_STEP",
+                "title": "Coordinate the next interview step",
+                "detail": "The employer recorded a scheduling or attendance update. Use the conversation to agree on what happens next.",
+                "stage": "INTERVIEW_COORDINATION",
+            }
         return {
             "code": "PREPARE_INTERVIEW",
             "title": "Prepare for your confirmed interview",
-            "detail": f"Interview confirmed for {confirmed[0]['start_at']}.",
+            "detail": f"Interview confirmed for {meeting['start_at']}.",
             "stage": "MEETING_CONFIRMED",
         }
 
@@ -134,11 +179,26 @@ def _employer_next_action(username):
     employer_meetings = [m for m in MEETINGS if m["conversation_id"] in conv_ids]
     if any(m["state"] == "CONFIRMED" for m in employer_meetings):
         m = next(m for m in employer_meetings if m["state"] == "CONFIRMED")
+        worker_response = m.get("worker_outcome_response")
+        if worker_response and worker_response.get("response") == "DISPUTE":
+            return {
+                "code": "REVIEW_WORKER_OUTCOME_DISPUTE",
+                "title": "Review the worker's response",
+                "detail": "The worker disputes the interview report. Keep the exchange private and preserve both statements; do not treat either as a public rating.",
+                "stage": "OUTCOME_REVIEW",
+            }
+        if m.get("employer_outcome"):
+            return {
+                "code": "WAIT_FOR_WORKER_OUTCOME_RESPONSE",
+                "title": "Interview update recorded",
+                "detail": "The worker can acknowledge or dispute the employer-reported update. The record does not verify employment or credentials.",
+                "stage": "OUTCOME_REVIEW",
+            }
         return {
-            "code": "PREPARE_INTERVIEW",
-            "title": "Prepare for the confirmed interview",
-            "detail": f"Interview confirmed for {m['start_at']}.",
-            "stage": "MEETING_CONFIRMED",
+            "code": "RECORD_INTERVIEW_OUTCOME",
+            "title": "Record the interview outcome when complete",
+            "detail": "When the interview has taken place, record the worker-visible next step. If it has not happened yet, no action is needed.",
+            "stage": "OUTCOME_PENDING",
         }
 
     if any(m["state"] == "PROPOSED" for m in employer_meetings):
@@ -251,6 +311,20 @@ class MeetingBody(BaseModel):
     conversation_id: str
     start_at: str = "Tomorrow 10:00 AM"
     end_at: str = "Tomorrow 10:30 AM"
+
+class MeetingOutcomeBody(BaseModel):
+    status: str
+    note: str = ""
+
+class MeetingOutcomeResponseBody(BaseModel):
+    response: str
+    note: str = ""
+
+MEETING_OUTCOMES = {
+    "OFFER_RECEIVED", "NOT_SELECTED", "FOLLOW_UP",
+    "RESCHEDULE_REQUESTED", "CANCELLED", "NO_SHOW",
+}
+MEETING_OUTCOME_RESPONSES = {"ACKNOWLEDGE", "DISPUTE"}
 
 class CustomerBody(BaseModel):
     service_category: str = "HVAC"
@@ -403,6 +477,70 @@ def accept_meeting(meeting_id: str, authorization: Optional[str] = Header(None))
     if participants.issubset(set(m["accepted_by"] + [m["created_by"]])):
         m["state"] = "CONFIRMED"
     return m
+
+@app.post("/api/partner/meetings/{meeting_id}/outcome")
+def record_meeting_outcome(meeting_id: str, body: MeetingOutcomeBody, authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    require_role(u, "EMPLOYER")
+    meeting = next((x for x in MEETINGS if x["id"] == meeting_id), None)
+    if not meeting:
+        raise HTTPException(404, "meeting not found")
+    conversation = next((x for x in CONVERSATIONS if x["id"] == meeting["conversation_id"]), None)
+    if not conversation or conversation["employer"] != u["username"]:
+        raise HTTPException(403, "meeting access denied")
+    if meeting["state"] != "CONFIRMED":
+        raise HTTPException(409, "interview must be confirmed before recording an outcome")
+    if meeting.get("employer_outcome"):
+        raise HTTPException(409, "an employer outcome is already recorded")
+    status = body.status.strip().upper()
+    note = body.note.strip()
+    if status not in MEETING_OUTCOMES:
+        raise HTTPException(422, "unsupported interview outcome")
+    if len(note) > 500:
+        raise HTTPException(422, "outcome note must be 500 characters or fewer")
+    recorded_at = now()
+    meeting["employer_outcome"] = {
+        "status": status,
+        "note": note,
+        "reported_by": u["username"],
+        "recorded_at": recorded_at,
+        "truth_state": "EMPLOYER_CONFIRMED",
+        "authority_state": "NONE",
+    }
+    meeting["outcome_truth_state"] = "EMPLOYER_CONFIRMED"
+    meeting["outcome_authority"] = "NONE"
+    return meeting
+
+@app.post("/api/worker/meetings/{meeting_id}/outcome-response")
+def respond_to_meeting_outcome(meeting_id: str, body: MeetingOutcomeResponseBody, authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    require_role(u, "WORKER")
+    meeting = next((x for x in MEETINGS if x["id"] == meeting_id), None)
+    if not meeting:
+        raise HTTPException(404, "meeting not found")
+    conversation = next((x for x in CONVERSATIONS if x["id"] == meeting["conversation_id"]), None)
+    if not conversation or conversation["worker"] != u["username"]:
+        raise HTTPException(403, "meeting access denied")
+    if not meeting.get("employer_outcome"):
+        raise HTTPException(409, "no employer outcome is available to respond to")
+    if meeting.get("worker_outcome_response"):
+        raise HTTPException(409, "a worker response is already recorded")
+    response = body.response.strip().upper()
+    note = body.note.strip()
+    if response not in MEETING_OUTCOME_RESPONSES:
+        raise HTTPException(422, "response must be ACKNOWLEDGE or DISPUTE")
+    if len(note) > 500:
+        raise HTTPException(422, "response note must be 500 characters or fewer")
+    meeting["worker_outcome_response"] = {
+        "response": response,
+        "note": note,
+        "responded_by": u["username"],
+        "responded_at": now(),
+        "truth_state": "SUPPORTED",
+    }
+    meeting["outcome_truth_state"] = "DISPUTED" if response == "DISPUTE" else "EMPLOYER_CONFIRMED"
+    meeting["outcome_authority"] = "NONE"
+    return meeting
 
 @app.post("/api/customer/requests")
 def customer_request(body: CustomerBody, authorization: Optional[str] = Header(None)):
@@ -628,6 +766,7 @@ input,textarea,select{width:100%;padding:12px 13px;border:1px solid #d9d2c8;bord
 <h3 style="margin-top:22px">What should I do next?</h3><div id="employer-next" class="item"></div>
 <h3 style="margin-top:22px">Introduction requests</h3><div id="employer-intros"></div>
 <h3 style="margin-top:22px">Conversation</h3><div id="employer-conv" class="item muted">Accept an introduction to unlock messaging.</div>
+<h3 style="margin-top:22px">Interview outcomes</h3><div id="employer-meetings"></div>
 </section>
 <section id="customer" class="card hidden">
 <h2>I Need Help</h2><p class="muted">Submit a service request and see its truthful status.</p>
@@ -661,12 +800,15 @@ async function loadNext(target){const n=await api("/api/next-action");document.g
 async function loginAs(name){try{const b=await api("/api/login",{method:"POST",body:JSON.stringify({identifier:name,password:"TradeDemo123!"})});token=b.session_token;role=b.roles[0];user=name;document.getElementById("session").innerHTML="<strong>"+b.name+"</strong><br>"+role;const map={WORKER:"worker",EMPLOYER:"employer",CUSTOMER:"customer",ADMIN:"admin"};show(map[role]);if(role==="WORKER")loadWorker();if(role==="EMPLOYER")loadEmployer();if(role==="ADMIN")loadAdmin()}catch(e){document.getElementById("session").textContent=e.message}}
 async function loadWorker(){await loadNext("worker-next");await loadWorkerReceipt();await loadWorkerHelp();const b=await api("/api/opportunities");document.getElementById("opps").innerHTML=b.items.map(o=>'<div class="item"><div class="row"><span class="pill '+(o.will_train?'green':'blue')+'">'+o.status+'</span><span class="pill">'+o.last_confirmed+'</span></div><strong>'+o.title+'</strong><div class="muted">'+o.employer+' · '+o.location+' · '+o.pay+'</div><div style="margin-top:10px"><span class="pill gold">'+o.fit+'</span></div><button class="btn" onclick="requestIntro(\''+o.id+'\')">Request introduction</button></div>').join("");await loadWorkerConv()}
 async function requestIntro(id){try{const b=await api("/api/intros",{method:"POST",body:JSON.stringify({opportunity_id:id})});alert("Introduction "+b.state);await loadNext("worker-next");await loadWorkerReceipt();await loadWorkerConv()}catch(e){alert(e.message)}}
-async function loadWorkerConv(){const c=await api("/api/conversations");const box=document.getElementById("worker-conv");if(!c.items.length){box.className="item muted";box.textContent="No accepted introduction yet.";return}const conv=c.items[0];const msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation unlocked</strong>"+msgs.items.map(m=>"<p><b>"+m.sender_name+":</b> "+m.body+"</p>").join("")+'<input id="wm" placeholder="Write a message"><button class="btn" onclick="sendMsg(\''+conv.id+'\',\'wm\')">Send</button>';const mt=await api("/api/meetings");document.getElementById("worker-meetings").innerHTML=mt.items.map(m=>'<div class="item"><strong>Interview · '+m.state+'</strong><div class="muted">'+m.start_at+'</div>'+(m.state!=="CONFIRMED"?'<button class="btn green" onclick="acceptMeeting(\''+m.id+'\')">Accept interview</button>':'')+'</div>').join("")}
-async function loadEmployer(){await loadNext("employer-next");const b=await api("/api/partner/intros");document.getElementById("employer-intros").innerHTML=b.items.length?b.items.map(i=>'<div class="item"><strong>'+i.worker_name+'</strong><div class="muted">'+i.opportunity_title+' · '+i.state+'</div>'+(i.state==="PENDING"?'<button class="btn green" onclick="acceptIntro(\''+i.id+'\')">Accept introduction</button>':'')+'</div>').join(""):'<div class="item muted">No introduction requests yet. Switch to Worker and request one.</div>';const c=await api("/api/conversations");const box=document.getElementById("employer-conv");if(c.items.length){const conv=c.items[0],msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation open</strong>"+msgs.items.map(m=>"<p><b>"+m.sender_name+":</b> "+m.body+"</p>").join("")+'<input id="em" placeholder="Message Jordan"><button class="btn" onclick="sendMsg(\''+conv.id+'\',\'em\')">Send</button><button class="btn gold" onclick="proposeMeeting(\''+conv.id+'\')">Propose interview</button>'}}
+async function loadWorkerConv(){const c=await api("/api/conversations");const box=document.getElementById("worker-conv");if(!c.items.length){box.className="item muted";box.textContent="No accepted introduction yet.";document.getElementById("worker-meetings").innerHTML="";return}const conv=c.items[0];const msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation unlocked</strong>"+msgs.items.map(m=>"<p><b>"+escapeHtml(m.sender_name)+":</b> "+escapeHtml(m.body)+"</p>").join("")+'<input id="wm" placeholder="Write a message"><button class="btn" onclick="sendMsg(\''+escapeHtml(conv.id)+'\',\'wm\')">Send</button>';const mt=await api("/api/meetings");document.getElementById("worker-meetings").innerHTML=mt.items.map(m=>{let outcome="";if(m.employer_outcome){outcome='<div class="status"><strong>Employer-reported: '+escapeHtml(m.employer_outcome.status.replaceAll("_"," "))+'</strong><br>'+escapeHtml(m.employer_outcome.note||"No additional note.")+'<br>Record: '+escapeHtml(m.outcome_truth_state||m.employer_outcome.truth_state)+' · Authority: NONE</div>';if(m.worker_outcome_response){outcome+='<div class="status">Your response: '+escapeHtml(m.worker_outcome_response.response)+' · '+escapeHtml(m.worker_outcome_response.note||"No note supplied.")+'</div>'}else{outcome+='<input id="worker-outcome-note-'+escapeHtml(m.id)+'" maxlength="500" placeholder="Optional correction or context"><button class="btn green" onclick="respondMeetingOutcome(\''+escapeHtml(m.id)+'\',\'ACKNOWLEDGE\')">Acknowledge</button><button class="btn secondary" onclick="respondMeetingOutcome(\''+escapeHtml(m.id)+'\',\'DISPUTE\')">Dispute this update</button>'}}return '<div class="item"><strong>Interview · '+escapeHtml(m.state)+'</strong><div class="muted">'+escapeHtml(m.start_at)+'</div>'+(m.state!=="CONFIRMED"?'<button class="btn green" onclick="acceptMeeting(\''+escapeHtml(m.id)+'\')">Accept interview</button>':'')+outcome+'</div>'}).join("")}
+async function loadEmployer(){await loadNext("employer-next");const b=await api("/api/partner/intros");document.getElementById("employer-intros").innerHTML=b.items.length?b.items.map(i=>'<div class="item"><strong>'+escapeHtml(i.worker_name)+'</strong><div class="muted">'+escapeHtml(i.opportunity_title)+' · '+escapeHtml(i.state)+'</div>'+(i.state==="PENDING"?'<button class="btn green" onclick="acceptIntro(\''+escapeHtml(i.id)+'\')">Accept introduction</button>':'')+'</div>').join(""):'<div class="item muted">No introduction requests yet. Switch to Worker and request one.</div>';const c=await api("/api/conversations");const box=document.getElementById("employer-conv");if(c.items.length){const conv=c.items[0],msgs=await api("/api/conversations/"+c.items[0].id+"/messages");box.className="item";box.innerHTML="<strong>Conversation open</strong>"+msgs.items.map(m=>"<p><b>"+escapeHtml(m.sender_name)+":</b> "+escapeHtml(m.body)+"</p>").join("")+'<input id="em" placeholder="Message Jordan"><button class="btn" onclick="sendMsg(\''+escapeHtml(conv.id)+'\',\'em\')">Send</button><button class="btn gold" onclick="proposeMeeting(\''+escapeHtml(conv.id)+'\')">Propose interview</button>'}const mt=await api("/api/meetings");document.getElementById("employer-meetings").innerHTML=mt.items.length?mt.items.map(m=>{if(m.employer_outcome){return '<div class="item"><strong>Outcome recorded · '+escapeHtml(m.employer_outcome.status.replaceAll("_"," "))+'</strong><div class="muted">'+escapeHtml(m.start_at)+' · '+escapeHtml(m.outcome_truth_state||m.employer_outcome.truth_state)+'</div><p>'+escapeHtml(m.employer_outcome.note||"No additional note.")+'</p>'+(m.worker_outcome_response?'<div class="status">Worker response: '+escapeHtml(m.worker_outcome_response.response)+' · '+escapeHtml(m.worker_outcome_response.note||"No note supplied.")+'</div>':'<div class="muted">Waiting for the worker to acknowledge or dispute this report.</div>')+'</div>'}if(m.state!=="CONFIRMED"){return '<div class="item"><strong>Interview · '+escapeHtml(m.state)+'</strong><div class="muted">'+escapeHtml(m.start_at)+' · Waiting for worker confirmation</div></div>'}return '<div class="item"><strong>Confirmed interview · '+escapeHtml(m.start_at)+'</strong><label>Outcome when the interview is complete</label><select id="meeting-outcome-'+escapeHtml(m.id)+'"><option value="FOLLOW_UP">Follow-up pending</option><option value="OFFER_RECEIVED">Offer reported</option><option value="NOT_SELECTED">Not selected</option><option value="RESCHEDULE_REQUESTED">Reschedule requested</option><option value="CANCELLED">Cancelled</option><option value="NO_SHOW">No-show reported</option></select><input id="meeting-note-'+escapeHtml(m.id)+'" maxlength="500" placeholder="Worker-visible note (optional)"><button class="btn gold" onclick="recordMeetingOutcome(\''+escapeHtml(m.id)+'\')">Record outcome</button><div class="muted">Employer-reported only; not employment or credential verification.</div></div>'}).join(""):'<div class="item muted">No interview proposals yet.</div>'}
+
 async function acceptIntro(id){await api("/api/partner/intros/"+id+"/accept",{method:"POST",body:"{}"});await loadEmployer()}
 async function sendMsg(conv,input){const el=document.getElementById(input);if(!el.value)return;await api("/api/conversations/"+conv+"/messages",{method:"POST",body:JSON.stringify({body:el.value})});if(role==="WORKER"){await loadNext("worker-next");await loadWorkerReceipt();loadWorkerConv()}else{await loadNext("employer-next");loadEmployer()}}
 async function proposeMeeting(conv){await api("/api/meetings",{method:"POST",body:JSON.stringify({conversation_id:conv,start_at:"Tomorrow 10:00 AM",end_at:"Tomorrow 10:30 AM"})});await loadNext("employer-next");alert("Interview proposed")}
 async function acceptMeeting(id){await api("/api/meetings/"+id+"/accept",{method:"POST",body:"{}"});await loadNext("worker-next");await loadWorkerConv()}
+async function recordMeetingOutcome(id){try{const status=document.getElementById("meeting-outcome-"+id).value;const note=document.getElementById("meeting-note-"+id).value;await api("/api/partner/meetings/"+id+"/outcome",{method:"POST",body:JSON.stringify({status,note})});await loadEmployer();await loadNext("employer-next")}catch(e){alert(e.message)}}
+async function respondMeetingOutcome(id,response){try{const note=document.getElementById("worker-outcome-note-"+id).value;await api("/api/worker/meetings/"+id+"/outcome-response",{method:"POST",body:JSON.stringify({response,note})});await loadWorkerConv();await loadNext("worker-next")}catch(e){alert(e.message)}}
 async function submitCustomer(){const b=await api("/api/customer/requests",{method:"POST",body:JSON.stringify({service_category:document.getElementById("service").value,description:document.getElementById("desc").value,location_text:document.getElementById("loc").value})});document.getElementById("customer-status").innerHTML='<div class="item"><strong>'+b.state+'</strong><div class="muted">Matched business: '+b.matched_business+'</div><span class="pill blue">'+b.truth_state+'</span></div>'}
 async function loadAdmin(){const b=await api("/api/admin/control-tower");document.getElementById("metrics").innerHTML=Object.entries(b.counts).map(([k,v])=>'<div class="item"><div class="metric">'+v+'</div><div class="muted">'+k.replaceAll("_"," ")+'</div></div>').join("");const q=await api("/api/admin/help-requests");document.getElementById("admin-help").innerHTML=q.items.length?q.items.map(x=>'<div class="item"><strong>'+escapeHtml(x.worker_name)+'</strong><div class="muted">'+escapeHtml(x.blocker.replaceAll("_"," "))+' · '+escapeHtml(x.urgency.replaceAll("_"," "))+' · '+escapeHtml(x.state)+'</div><p>'+escapeHtml(x.details||"No additional details.")+'</p>'+(x.worker_visible_update?'<div class="status">'+escapeHtml(x.worker_visible_update)+'</div>':'')+(x.worker_responses&&x.worker_responses.length?'<div class="status"><strong>Worker replies</strong><br>'+x.worker_responses.map(r=>escapeHtml(r.message)).join("<br>")+'</div>':'')+(x.state!=="CLOSED_BY_WORKER"?'<input id="help-update-'+escapeHtml(x.id)+'" placeholder="Optional worker-visible update" maxlength="500"><button class="btn secondary" onclick="reviewHelpRequest(\''+escapeHtml(x.id)+'\',\'IN_REVIEW\')">Mark in review</button><button class="btn gold" onclick="reviewHelpRequest(\''+escapeHtml(x.id)+'\',\'WAITING_ON_WORKER\')">Ask worker for info</button>':'<span class="pill">Closed by worker</span>')+'<span class="pill blue">'+escapeHtml(x.truth_state)+'</span></div>').join(""):'<div class="item muted">No worker help requests recorded.</div>'}
 loginAs("jordan");
