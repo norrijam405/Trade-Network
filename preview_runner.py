@@ -43,6 +43,7 @@ PERSISTED = {
     "messages": namespace["MESSAGES"],
     "meetings": namespace["MEETINGS"],
     "customer_requests": namespace["CUSTOMER_REQUESTS"],
+    "help_requests": namespace["HELP_REQUESTS"],
 }
 
 def _connect():
@@ -152,6 +153,7 @@ def _run_house_selftest():
         "messages": list(ns["MESSAGES"]),
         "meetings": list(ns["MEETINGS"]),
         "customer_requests": list(ns["CUSTOMER_REQUESTS"]),
+        "help_requests": list(ns["HELP_REQUESTS"]),
     }
     try:
         ns["TOKENS"].clear()
@@ -160,6 +162,7 @@ def _run_house_selftest():
         ns["MESSAGES"].clear()
         ns["MEETINGS"].clear()
         ns["CUSTOMER_REQUESTS"].clear()
+        ns["HELP_REQUESTS"].clear()
 
         expires = ns["time"].time() + 3600
         ns["TOKENS"].update({
@@ -258,6 +261,7 @@ def _run_house_selftest():
             ("MESSAGES", saved["messages"]),
             ("MEETINGS", saved["meetings"]),
             ("CUSTOMER_REQUESTS", saved["customer_requests"]),
+            ("HELP_REQUESTS", saved["help_requests"]),
         ):
             ns[key].clear()
             ns[key].extend(source)

@@ -26,6 +26,7 @@ CONVERSATIONS = []
 MESSAGES = []
 MEETINGS = []
 CUSTOMER_REQUESTS = []
+HELP_REQUESTS = []
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -249,6 +250,11 @@ class CustomerBody(BaseModel):
     urgency: str = "THIS_WEEK"
     learner_preference: str = "NO_PREFERENCE"
 
+class WorkerHelpBody(BaseModel):
+    blocker: str
+    details: str = ""
+    urgency: str = "THIS_WEEK"
+
 @app.get("/health")
 def health():
     return {"ok": True, "service":"trade-network-r2-preview"}
@@ -400,6 +406,64 @@ def customer_request(body: CustomerBody, authorization: Optional[str] = Header(N
     CUSTOMER_REQUESTS.append(item)
     return item
 
+HELP_BLOCKERS = {
+    "TRANSPORT", "CHILDCARE", "TOOLS", "LICENSING",
+    "SCHEDULE", "LOCATION", "TRAINING", "EMPLOYER_RESPONSE", "OTHER",
+}
+HELP_URGENCIES = {"IMMEDIATELY", "THIS_WEEK", "EXPLORING"}
+
+@app.post("/api/worker/help-requests")
+def create_worker_help_request(body: WorkerHelpBody, authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    require_role(u, "WORKER")
+    blocker = body.blocker.strip().upper()
+    details = body.details.strip()
+    urgency = body.urgency.strip().upper()
+    if blocker not in HELP_BLOCKERS:
+        raise HTTPException(422, "unsupported blocker category")
+    if urgency not in HELP_URGENCIES:
+        raise HTTPException(422, "unsupported urgency")
+    if len(details) > 1000:
+        raise HTTPException(422, "details must be 1000 characters or fewer")
+    existing = next((
+        x for x in HELP_REQUESTS
+        if x["worker"] == u["username"]
+        and x["blocker"] == blocker
+        and x["details"] == details
+        and x["urgency"] == urgency
+        and x["state"] in ("OPEN", "IN_REVIEW", "WAITING_ON_WORKER")
+    ), None)
+    if existing:
+        return existing
+    item = {
+        "id": f"help-{len(HELP_REQUESTS) + 1}",
+        "worker": u["username"],
+        "worker_name": u["name"],
+        "blocker": blocker,
+        "details": details,
+        "urgency": urgency,
+        "state": "OPEN",
+        "created_at": now(),
+        "truth_state": "SUPPORTED",
+        "evidence_scope": "PLATFORM_RECORDED_REQUEST_ONLY",
+        "resolution_authority": "NONE",
+        "notice": "Request recorded only. No resource, employer, or service provider has been confirmed or contacted.",
+    }
+    HELP_REQUESTS.append(item)
+    return item
+
+@app.get("/api/worker/help-requests")
+def list_worker_help_requests(authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    require_role(u, "WORKER")
+    return {"items": [x for x in HELP_REQUESTS if x["worker"] == u["username"]]}
+
+@app.get("/api/admin/help-requests")
+def admin_help_requests(authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    require_role(u, "ADMIN")
+    return {"items": list(HELP_REQUESTS), "truth_state": "SUPPORTED_PLATFORM_ACTIVITY_ONLY"}
+
 @app.get("/api/admin/control-tower")
 def control_tower(authorization: Optional[str] = Header(None)):
     u = auth_header(authorization)
@@ -415,6 +479,8 @@ def control_tower(authorization: Optional[str] = Header(None)):
             "meetings":len(MEETINGS),
             "confirmed_meetings":len([x for x in MEETINGS if x["state"]=="CONFIRMED"]),
             "customer_requests":len(CUSTOMER_REQUESTS),
+            "worker_help_requests":len(HELP_REQUESTS),
+            "open_worker_help_requests":len([x for x in HELP_REQUESTS if x["state"] == "OPEN"]),
         }
     }
 
@@ -460,6 +526,22 @@ input,textarea,select{width:100%;padding:12px 13px;border:1px solid #d9d2c8;bord
 <h3 style="margin-top:22px">Messages & schedule</h3><div id="worker-conv" class="item muted">No accepted introduction yet.</div>
 <div id="worker-meetings"></div>
 <h3 style="margin-top:22px">My journey receipt</h3><div id="worker-receipt" class="item muted">Platform-recorded activity will appear here.</div>
+<h3 style="margin-top:22px">Still need help? No dead end.</h3>
+<p class="muted">Tell us what is blocking your next step. We record the request so it can be reviewed; submitting it does not mean a resource or provider has been found.</p>
+<label>What is getting in your way?</label>
+<select id="help-blocker">
+<option value="TRANSPORT">Transportation</option><option value="CHILDCARE">Childcare</option>
+<option value="TOOLS">Tools or equipment</option><option value="LICENSING">Licensing or certification</option>
+<option value="SCHEDULE">Schedule or availability</option><option value="LOCATION">Location or distance</option>
+<option value="TRAINING">Training or experience</option><option value="EMPLOYER_RESPONSE">Employer has not responded</option>
+<option value="OTHER">Something else</option>
+</select>
+<label>Anything we should understand? (optional)</label>
+<textarea id="help-details" rows="3" maxlength="1000" placeholder="Share only what is needed to explain the blocker."></textarea>
+<label>How urgent is it?</label>
+<select id="help-urgency"><option value="IMMEDIATELY">I need help immediately</option><option value="THIS_WEEK" selected>This week</option><option value="EXPLORING">I am exploring options</option></select>
+<button class="btn gold" onclick="submitWorkerHelp()">I still need help</button>
+<div id="worker-help-status" class="item muted">No help request submitted.</div>
 </section>
 <section id="employer" class="card hidden">
 <h2>Red River Mechanical</h2><p class="muted">Employer development portal</p>
@@ -480,16 +562,22 @@ input,textarea,select{width:100%;padding:12px 13px;border:1px solid #d9d2c8;bord
 <h2>Control Tower</h2><p class="muted">Evidence state remains UNKNOWN until evidence supports another decision.</p>
 <div class="notice"><strong>Decision state: UNKNOWN</strong> · Activity is not proof of market success.</div>
 <div id="metrics" class="split"></div>
+<h3 style="margin-top:22px">Worker help queue</h3>
+<div class="muted">Requests are platform-recorded and do not imply a resource match or completed intervention.</div>
+<div id="admin-help"></div>
 </section>
 </div></div></div>
 <script>
 let token=null,role=null,user=null;
+function escapeHtml(value){return String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));}
 async function api(path,opt={}){opt.headers={...(opt.headers||{}),"Content-Type":"application/json"};if(token)opt.headers.Authorization="Bearer "+token;const r=await fetch(path,opt);let b={};try{b=await r.json()}catch{}if(!r.ok)throw new Error(b.detail||("HTTP "+r.status));return b}
 function show(id){["worker","employer","customer","admin"].forEach(x=>document.getElementById(x).classList.add("hidden"));document.getElementById(id).classList.remove("hidden");["worker","employer","customer","admin"].forEach(x=>document.getElementById("nav-"+x).classList.remove("active"));document.getElementById("nav-"+id).classList.add("active")}
 async function loadWorkerReceipt(){const r=await api("/api/worker/journey-receipt");const box=document.getElementById("worker-receipt");const events=r.events||[];box.className="item";box.innerHTML='<div class="row"><span class="pill blue">'+r.evidence_scope.replaceAll("_"," ")+'</span><span class="pill">Authority '+r.authority_state+'</span></div><strong>'+events.length+' recorded milestone'+(events.length===1?'':'s')+'</strong><div class="muted" style="margin-top:8px">'+(events.length?events.map(e=>e.event_type.replaceAll("_"," ")+' · '+e.state).join("<br>"):'No journey events recorded yet.')+'</div><div class="muted" style="margin-top:10px;font-size:13px">Not a credential, license, qualifying-hours decision, or regulator acceptance.</div>'}
+async function loadWorkerHelp(){const b=await api("/api/worker/help-requests");const box=document.getElementById("worker-help-status");if(!b.items.length){box.className="item muted";box.textContent="No help request submitted.";return}box.className="item";box.innerHTML=b.items.slice().reverse().map(x=>'<div><strong>'+escapeHtml(x.blocker.replaceAll("_"," "))+'</strong><div class="muted">'+escapeHtml(x.state)+' · '+escapeHtml(x.urgency.replaceAll("_"," "))+'</div><p>'+escapeHtml(x.details||"No additional details supplied.")+'</p><div class="muted" style="font-size:13px">'+escapeHtml(x.notice)+'</div><span class="pill blue">'+escapeHtml(x.truth_state)+'</span></div>').join("<hr>")}
+async function submitWorkerHelp(){try{await api("/api/worker/help-requests",{method:"POST",body:JSON.stringify({blocker:document.getElementById("help-blocker").value,details:document.getElementById("help-details").value,urgency:document.getElementById("help-urgency").value})});document.getElementById("help-details").value="";await loadWorkerHelp()}catch(e){alert(e.message)}}
 async function loadNext(target){const n=await api("/api/next-action");document.getElementById(target).innerHTML='<strong>'+n.title+'</strong><div class="muted">'+n.detail+'</div><div style="margin-top:10px"><span class="pill blue">'+n.stage.replaceAll("_"," ")+'</span></div>'}
 async function loginAs(name){try{const b=await api("/api/login",{method:"POST",body:JSON.stringify({identifier:name,password:"TradeDemo123!"})});token=b.session_token;role=b.roles[0];user=name;document.getElementById("session").innerHTML="<strong>"+b.name+"</strong><br>"+role;const map={WORKER:"worker",EMPLOYER:"employer",CUSTOMER:"customer",ADMIN:"admin"};show(map[role]);if(role==="WORKER")loadWorker();if(role==="EMPLOYER")loadEmployer();if(role==="ADMIN")loadAdmin()}catch(e){document.getElementById("session").textContent=e.message}}
-async function loadWorker(){await loadNext("worker-next");await loadWorkerReceipt();const b=await api("/api/opportunities");document.getElementById("opps").innerHTML=b.items.map(o=>'<div class="item"><div class="row"><span class="pill '+(o.will_train?'green':'blue')+'">'+o.status+'</span><span class="pill">'+o.last_confirmed+'</span></div><strong>'+o.title+'</strong><div class="muted">'+o.employer+' · '+o.location+' · '+o.pay+'</div><div style="margin-top:10px"><span class="pill gold">'+o.fit+'</span></div><button class="btn" onclick="requestIntro(\''+o.id+'\')">Request introduction</button></div>').join("");await loadWorkerConv()}
+async function loadWorker(){await loadNext("worker-next");await loadWorkerReceipt();await loadWorkerHelp();const b=await api("/api/opportunities");document.getElementById("opps").innerHTML=b.items.map(o=>'<div class="item"><div class="row"><span class="pill '+(o.will_train?'green':'blue')+'">'+o.status+'</span><span class="pill">'+o.last_confirmed+'</span></div><strong>'+o.title+'</strong><div class="muted">'+o.employer+' · '+o.location+' · '+o.pay+'</div><div style="margin-top:10px"><span class="pill gold">'+o.fit+'</span></div><button class="btn" onclick="requestIntro(\''+o.id+'\')">Request introduction</button></div>').join("");await loadWorkerConv()}
 async function requestIntro(id){try{const b=await api("/api/intros",{method:"POST",body:JSON.stringify({opportunity_id:id})});alert("Introduction "+b.state);await loadNext("worker-next");await loadWorkerReceipt();await loadWorkerConv()}catch(e){alert(e.message)}}
 async function loadWorkerConv(){const c=await api("/api/conversations");const box=document.getElementById("worker-conv");if(!c.items.length){box.className="item muted";box.textContent="No accepted introduction yet.";return}const conv=c.items[0];const msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation unlocked</strong>"+msgs.items.map(m=>"<p><b>"+m.sender_name+":</b> "+m.body+"</p>").join("")+'<input id="wm" placeholder="Write a message"><button class="btn" onclick="sendMsg(\''+conv.id+'\',\'wm\')">Send</button>';const mt=await api("/api/meetings");document.getElementById("worker-meetings").innerHTML=mt.items.map(m=>'<div class="item"><strong>Interview · '+m.state+'</strong><div class="muted">'+m.start_at+'</div>'+(m.state!=="CONFIRMED"?'<button class="btn green" onclick="acceptMeeting(\''+m.id+'\')">Accept interview</button>':'')+'</div>').join("")}
 async function loadEmployer(){await loadNext("employer-next");const b=await api("/api/partner/intros");document.getElementById("employer-intros").innerHTML=b.items.length?b.items.map(i=>'<div class="item"><strong>'+i.worker_name+'</strong><div class="muted">'+i.opportunity_title+' · '+i.state+'</div>'+(i.state==="PENDING"?'<button class="btn green" onclick="acceptIntro(\''+i.id+'\')">Accept introduction</button>':'')+'</div>').join(""):'<div class="item muted">No introduction requests yet. Switch to Worker and request one.</div>';const c=await api("/api/conversations");const box=document.getElementById("employer-conv");if(c.items.length){const conv=c.items[0],msgs=await api("/api/conversations/"+conv.id+"/messages");box.className="item";box.innerHTML="<strong>Conversation open</strong>"+msgs.items.map(m=>"<p><b>"+m.sender_name+":</b> "+m.body+"</p>").join("")+'<input id="em" placeholder="Message Jordan"><button class="btn" onclick="sendMsg(\''+conv.id+'\',\'em\')">Send</button><button class="btn gold" onclick="proposeMeeting(\''+conv.id+'\')">Propose interview</button>'}}
@@ -498,7 +586,7 @@ async function sendMsg(conv,input){const el=document.getElementById(input);if(!e
 async function proposeMeeting(conv){await api("/api/meetings",{method:"POST",body:JSON.stringify({conversation_id:conv,start_at:"Tomorrow 10:00 AM",end_at:"Tomorrow 10:30 AM"})});await loadNext("employer-next");alert("Interview proposed")}
 async function acceptMeeting(id){await api("/api/meetings/"+id+"/accept",{method:"POST",body:"{}"});await loadNext("worker-next");await loadWorkerConv()}
 async function submitCustomer(){const b=await api("/api/customer/requests",{method:"POST",body:JSON.stringify({service_category:document.getElementById("service").value,description:document.getElementById("desc").value,location_text:document.getElementById("loc").value})});document.getElementById("customer-status").innerHTML='<div class="item"><strong>'+b.state+'</strong><div class="muted">Matched business: '+b.matched_business+'</div><span class="pill blue">'+b.truth_state+'</span></div>'}
-async function loadAdmin(){const b=await api("/api/admin/control-tower");document.getElementById("metrics").innerHTML=Object.entries(b.counts).map(([k,v])=>'<div class="item"><div class="metric">'+v+'</div><div class="muted">'+k.replaceAll("_"," ")+'</div></div>').join("")}
+async function loadAdmin(){const b=await api("/api/admin/control-tower");document.getElementById("metrics").innerHTML=Object.entries(b.counts).map(([k,v])=>'<div class="item"><div class="metric">'+v+'</div><div class="muted">'+k.replaceAll("_"," ")+'</div></div>').join("");const q=await api("/api/admin/help-requests");document.getElementById("admin-help").innerHTML=q.items.length?q.items.map(x=>'<div class="item"><strong>'+escapeHtml(x.worker_name)+'</strong><div class="muted">'+escapeHtml(x.blocker.replaceAll("_"," "))+' · '+escapeHtml(x.urgency.replaceAll("_"," "))+' · '+escapeHtml(x.state)+'</div><p>'+escapeHtml(x.details||"No additional details.")+'</p><span class="pill blue">'+escapeHtml(x.truth_state)+'</span></div>').join(""):'<div class="item muted">No worker help requests recorded.</div>'}
 loginAs("jordan");
 </script></body></html>"""
 

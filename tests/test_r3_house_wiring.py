@@ -16,6 +16,7 @@ def reset_demo_state():
     ns["MESSAGES"].clear()
     ns["MEETINGS"].clear()
     ns["CUSTOMER_REQUESTS"].clear()
+    ns["HELP_REQUESTS"].clear()
     yield
 
 def login(identifier):
@@ -334,3 +335,60 @@ def test_worker_journey_receipt_records_platform_activity_without_overclaiming()
     assert all(e["truth_state"] == "SUPPORTED" for e in body["events"])
     assert body["current_stage"] == "MEETING_CONFIRMED"
     assert body["authority_state"] == "UNKNOWN"
+
+
+def test_worker_no_dead_end_help_request_is_scoped_deduplicated_and_truth_bounded():
+    worker = login("jordan")
+    owner = login("owner")
+    customer = login("customer")
+    admin = login("admin")
+    payload = {
+        "blocker": "TRANSPORT",
+        "details": "Fictional bus route ends before shift start.",
+        "urgency": "THIS_WEEK",
+    }
+
+    first = client.post("/api/worker/help-requests", headers=auth(worker), json=payload)
+    second = client.post("/api/worker/help-requests", headers=auth(worker), json=payload)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+    assert first.json()["state"] == "OPEN"
+    assert first.json()["truth_state"] == "SUPPORTED"
+    assert first.json()["evidence_scope"] == "PLATFORM_RECORDED_REQUEST_ONLY"
+    assert first.json()["resolution_authority"] == "NONE"
+    assert "has been confirmed or contacted" in first.json()["notice"]
+
+    own = client.get("/api/worker/help-requests", headers=auth(worker))
+    assert own.status_code == 200
+    assert len(own.json()["items"]) == 1
+
+    assert client.get("/api/worker/help-requests", headers=auth(owner)).status_code == 403
+    assert client.post("/api/worker/help-requests", headers=auth(customer), json=payload).status_code == 403
+    assert client.get("/api/admin/help-requests", headers=auth(worker)).status_code == 403
+
+    queue = client.get("/api/admin/help-requests", headers=auth(admin))
+    assert queue.status_code == 200
+    assert len(queue.json()["items"]) == 1
+    tower = client.get("/api/admin/control-tower", headers=auth(admin)).json()
+    assert tower["counts"]["worker_help_requests"] == 1
+    assert tower["counts"]["open_worker_help_requests"] == 1
+    assert "help_requests" in runtime.PERSISTED
+    assert runtime.PERSISTED["help_requests"] is runtime.namespace["HELP_REQUESTS"]
+
+
+def test_worker_help_request_rejects_unknown_blockers_and_oversized_details():
+    worker = login("jordan")
+    bad_blocker = client.post(
+        "/api/worker/help-requests",
+        headers=auth(worker),
+        json={"blocker": "MONEY", "details": "fictional"},
+    )
+    assert bad_blocker.status_code == 422
+
+    too_long = client.post(
+        "/api/worker/help-requests",
+        headers=auth(worker),
+        json={"blocker": "OTHER", "details": "x" * 1001},
+    )
+    assert too_long.status_code == 422
