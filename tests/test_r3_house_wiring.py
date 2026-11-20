@@ -504,3 +504,105 @@ def test_worker_can_reply_to_admin_follow_up_and_return_request_to_review_queue(
     assert admin_queue.json()["items"][0]["worker_responses"][-1]["message"] == "I can reach the Tuesday and Thursday shifts."
     assert client.get("/api/next-action", headers=auth(worker)).json()["code"] != "RESPOND_TO_HELP_REQUEST"
 
+def _confirmed_interview():
+    worker = login("jordan")
+    employer = login("owner")
+    intro = client.post("/api/intros", headers=auth(worker), json={"opportunity_id": "n2"}).json()
+    accepted = client.post(f"/api/partner/intros/{intro['id']}/accept", headers=auth(employer))
+    assert accepted.status_code == 200
+    conversation_id = accepted.json()["conversation"]["id"]
+    proposed = client.post(
+        "/api/meetings",
+        headers=auth(employer),
+        json={"conversation_id": conversation_id, "start_at": "2026-11-21T10:00:00", "end_at": "2026-11-21T10:30:00"},
+    )
+    assert proposed.status_code == 200
+    confirmed = client.post(f"/api/meetings/{proposed.json()['id']}/accept", headers=auth(worker))
+    assert confirmed.status_code == 200
+    assert confirmed.json()["state"] == "CONFIRMED"
+    return worker, employer, proposed.json()["id"]
+
+
+def test_employer_outcome_is_private_report_and_worker_can_dispute():
+    worker, employer, meeting_id = _confirmed_interview()
+    worker_cannot_write_employer_outcome = client.post(
+        f"/api/partner/meetings/{meeting_id}/outcome",
+        headers=auth(worker),
+        json={"status": "NOT_SELECTED", "note": "Fictional report."},
+    )
+    assert worker_cannot_write_employer_outcome.status_code == 403
+
+    recorded = client.post(
+        f"/api/partner/meetings/{meeting_id}/outcome",
+        headers=auth(employer),
+        json={"status": "NOT_SELECTED", "note": "Fictional pilot outcome."},
+    )
+    assert recorded.status_code == 200
+    assert recorded.json()["employer_outcome"]["truth_state"] == "EMPLOYER_CONFIRMED"
+    assert recorded.json()["outcome_authority"] == "NONE"
+    assert recorded.json()["outcome_truth_state"] == "EMPLOYER_CONFIRMED"
+    assert client.get("/api/next-action", headers=auth(worker)).json()["code"] == "REVIEW_INTERVIEW_OUTCOME"
+
+    duplicate = client.post(
+        f"/api/partner/meetings/{meeting_id}/outcome",
+        headers=auth(employer),
+        json={"status": "OFFER_RECEIVED", "note": "Duplicate must not overwrite."},
+    )
+    assert duplicate.status_code == 409
+
+    employer_cannot_answer_for_worker = client.post(
+        f"/api/worker/meetings/{meeting_id}/outcome-response",
+        headers=auth(employer),
+        json={"response": "DISPUTE", "note": "Wrong role."},
+    )
+    assert employer_cannot_answer_for_worker.status_code == 403
+
+    disputed = client.post(
+        f"/api/worker/meetings/{meeting_id}/outcome-response",
+        headers=auth(worker),
+        json={"response": "DISPUTE", "note": "I was asked to return for a second interview."},
+    )
+    assert disputed.status_code == 200
+    assert disputed.json()["outcome_truth_state"] == "DISPUTED"
+    assert disputed.json()["outcome_authority"] == "NONE"
+    assert disputed.json()["employer_outcome"]["truth_state"] == "EMPLOYER_CONFIRMED"
+    assert disputed.json()["worker_outcome_response"]["truth_state"] == "SUPPORTED"
+    assert client.get("/api/next-action", headers=auth(worker)).json()["code"] == "OUTCOME_DISPUTED"
+    assert client.get("/api/next-action", headers=auth(employer)).json()["code"] == "REVIEW_WORKER_OUTCOME_DISPUTE"
+    admin = login("admin")
+    tower = client.get("/api/admin/control-tower", headers=auth(admin))
+    assert tower.status_code == 200
+    assert tower.json()["decision_state"] == "UNKNOWN"
+
+
+def test_interview_outcome_requires_confirmed_meeting_and_valid_status():
+    worker = login("jordan")
+    employer = login("owner")
+    intro = client.post("/api/intros", headers=auth(worker), json={"opportunity_id": "n2"}).json()
+    accepted = client.post(f"/api/partner/intros/{intro['id']}/accept", headers=auth(employer)).json()
+    proposed = client.post(
+        "/api/meetings",
+        headers=auth(employer),
+        json={"conversation_id": accepted["conversation"]["id"], "start_at": "2026-11-21T11:00:00", "end_at": "2026-11-21T11:30:00"},
+    ).json()
+    too_early = client.post(
+        f"/api/partner/meetings/{proposed['id']}/outcome",
+        headers=auth(employer),
+        json={"status": "NOT_SELECTED"},
+    )
+    assert too_early.status_code == 409
+    confirmed = client.post(f"/api/meetings/{proposed['id']}/accept", headers=auth(worker))
+    assert confirmed.status_code == 200
+    invalid = client.post(
+        f"/api/partner/meetings/{proposed['id']}/outcome",
+        headers=auth(employer),
+        json={"status": "HIRED"},
+    )
+    assert invalid.status_code == 422
+    long_note = client.post(
+        f"/api/partner/meetings/{proposed['id']}/outcome",
+        headers=auth(employer),
+        json={"status": "FOLLOW_UP", "note": "x" * 501},
+    )
+    assert long_note.status_code == 422
+
