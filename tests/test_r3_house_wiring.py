@@ -392,3 +392,57 @@ def test_worker_help_request_rejects_unknown_blockers_and_oversized_details():
         json={"blocker": "OTHER", "details": "x" * 1001},
     )
     assert too_long.status_code == 422
+
+
+def test_admin_help_triage_is_bounded_and_worker_visible():
+    worker = login("jordan")
+    admin = login("admin")
+    request = client.post(
+        "/api/worker/help-requests",
+        headers=auth(worker),
+        json={"blocker": "CHILDCARE", "details": "Fictional shift begins before childcare opens."},
+    ).json()
+
+    in_review = client.patch(
+        f"/api/admin/help-requests/{request['id']}",
+        headers=auth(admin),
+        json={"state": "IN_REVIEW", "worker_visible_update": "A coordinator is reviewing the request."},
+    )
+    assert in_review.status_code == 200
+    assert in_review.json()["state"] == "IN_REVIEW"
+    assert in_review.json()["resolution_authority"] == "NONE"
+
+    waiting = client.patch(
+        f"/api/admin/help-requests/{request['id']}",
+        headers=auth(admin),
+        json={"state": "WAITING_ON_WORKER", "worker_visible_update": "Please confirm the days and hours you need."},
+    )
+    assert waiting.status_code == 200
+    own = client.get("/api/worker/help-requests", headers=auth(worker)).json()["items"][0]
+    assert own["state"] == "WAITING_ON_WORKER"
+    assert own["worker_visible_update"] == "Please confirm the days and hours you need."
+
+    false_resolution = client.patch(
+        f"/api/admin/help-requests/{request['id']}",
+        headers=auth(admin),
+        json={"state": "RESOLVED", "worker_visible_update": "Resolved."},
+    )
+    assert false_resolution.status_code == 422
+
+
+def test_worker_can_close_only_their_own_help_request():
+    worker = login("jordan")
+    owner = login("owner")
+    request = client.post(
+        "/api/worker/help-requests",
+        headers=auth(worker),
+        json={"blocker": "TOOLS", "details": "Fictional starter tool gap."},
+    ).json()
+
+    denied = client.post(f"/api/worker/help-requests/{request['id']}/close", headers=auth(owner), json={})
+    assert denied.status_code == 403
+
+    closed = client.post(f"/api/worker/help-requests/{request['id']}/close", headers=auth(worker), json={})
+    assert closed.status_code == 200
+    assert closed.json()["state"] == "CLOSED_BY_WORKER"
+    assert closed.json()["resolution_authority"] == "NONE"

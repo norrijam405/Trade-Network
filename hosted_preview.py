@@ -255,6 +255,10 @@ class WorkerHelpBody(BaseModel):
     details: str = ""
     urgency: str = "THIS_WEEK"
 
+class WorkerHelpReviewBody(BaseModel):
+    state: str
+    worker_visible_update: str = ""
+
 @app.get("/health")
 def health():
     return {"ok": True, "service":"trade-network-r2-preview"}
@@ -458,11 +462,48 @@ def list_worker_help_requests(authorization: Optional[str] = Header(None)):
     require_role(u, "WORKER")
     return {"items": [x for x in HELP_REQUESTS if x["worker"] == u["username"]]}
 
+@app.post("/api/worker/help-requests/{request_id}/close")
+def close_worker_help_request(request_id: str, authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    require_role(u, "WORKER")
+    item = next((x for x in HELP_REQUESTS if x["id"] == request_id and x["worker"] == u["username"]), None)
+    if not item:
+        raise HTTPException(404, "help request not found")
+    if item["state"] != "CLOSED_BY_WORKER":
+        item["state"] = "CLOSED_BY_WORKER"
+        item["closed_at"] = now()
+        item["updated_at"] = now()
+    return item
+
 @app.get("/api/admin/help-requests")
 def admin_help_requests(authorization: Optional[str] = Header(None)):
     u = auth_header(authorization)
     require_role(u, "ADMIN")
     return {"items": list(HELP_REQUESTS), "truth_state": "SUPPORTED_PLATFORM_ACTIVITY_ONLY"}
+
+@app.patch("/api/admin/help-requests/{request_id}")
+def review_worker_help_request(request_id: str, body: WorkerHelpReviewBody, authorization: Optional[str] = Header(None)):
+    u = auth_header(authorization)
+    require_role(u, "ADMIN")
+    item = next((x for x in HELP_REQUESTS if x["id"] == request_id), None)
+    if not item:
+        raise HTTPException(404, "help request not found")
+    if item["state"] == "CLOSED_BY_WORKER":
+        raise HTTPException(409, "worker-closed request cannot be reopened in this pilot")
+    state = body.state.strip().upper()
+    if state not in {"OPEN", "IN_REVIEW", "WAITING_ON_WORKER"}:
+        raise HTTPException(422, "unsupported review state; this pilot cannot mark a request resolved")
+    update = body.worker_visible_update.strip()
+    if len(update) > 500:
+        raise HTTPException(422, "worker update must be 500 characters or fewer")
+    if state == "WAITING_ON_WORKER" and not update:
+        raise HTTPException(422, "a worker-visible update is required")
+    item["state"] = state
+    item["reviewed_by"] = u["username"]
+    item["worker_visible_update"] = update
+    item["updated_at"] = now()
+    item["resolution_authority"] = "NONE"
+    return item
 
 @app.get("/api/admin/control-tower")
 def control_tower(authorization: Optional[str] = Header(None)):
@@ -573,8 +614,10 @@ function escapeHtml(value){return String(value??"").replace(/[&<>"']/g,ch=>({"&"
 async function api(path,opt={}){opt.headers={...(opt.headers||{}),"Content-Type":"application/json"};if(token)opt.headers.Authorization="Bearer "+token;const r=await fetch(path,opt);let b={};try{b=await r.json()}catch{}if(!r.ok)throw new Error(b.detail||("HTTP "+r.status));return b}
 function show(id){["worker","employer","customer","admin"].forEach(x=>document.getElementById(x).classList.add("hidden"));document.getElementById(id).classList.remove("hidden");["worker","employer","customer","admin"].forEach(x=>document.getElementById("nav-"+x).classList.remove("active"));document.getElementById("nav-"+id).classList.add("active")}
 async function loadWorkerReceipt(){const r=await api("/api/worker/journey-receipt");const box=document.getElementById("worker-receipt");const events=r.events||[];box.className="item";box.innerHTML='<div class="row"><span class="pill blue">'+r.evidence_scope.replaceAll("_"," ")+'</span><span class="pill">Authority '+r.authority_state+'</span></div><strong>'+events.length+' recorded milestone'+(events.length===1?'':'s')+'</strong><div class="muted" style="margin-top:8px">'+(events.length?events.map(e=>e.event_type.replaceAll("_"," ")+' · '+e.state).join("<br>"):'No journey events recorded yet.')+'</div><div class="muted" style="margin-top:10px;font-size:13px">Not a credential, license, qualifying-hours decision, or regulator acceptance.</div>'}
-async function loadWorkerHelp(){const b=await api("/api/worker/help-requests");const box=document.getElementById("worker-help-status");if(!b.items.length){box.className="item muted";box.textContent="No help request submitted.";return}box.className="item";box.innerHTML=b.items.slice().reverse().map(x=>'<div><strong>'+escapeHtml(x.blocker.replaceAll("_"," "))+'</strong><div class="muted">'+escapeHtml(x.state)+' · '+escapeHtml(x.urgency.replaceAll("_"," "))+'</div><p>'+escapeHtml(x.details||"No additional details supplied.")+'</p><div class="muted" style="font-size:13px">'+escapeHtml(x.notice)+'</div><span class="pill blue">'+escapeHtml(x.truth_state)+'</span></div>').join("<hr>")}
+async function loadWorkerHelp(){const b=await api("/api/worker/help-requests");const box=document.getElementById("worker-help-status");if(!b.items.length){box.className="item muted";box.textContent="No help request submitted.";return}box.className="item";box.innerHTML=b.items.slice().reverse().map(x=>'<div><strong>'+escapeHtml(x.blocker.replaceAll("_"," "))+'</strong><div class="muted">'+escapeHtml(x.state)+' · '+escapeHtml(x.urgency.replaceAll("_"," "))+'</div><p>'+escapeHtml(x.details||"No additional details supplied.")+'</p><div class="muted" style="font-size:13px">'+escapeHtml(x.notice)+'</div>'+(x.worker_visible_update?'<div class="status">'+escapeHtml(x.worker_visible_update)+'</div>':'')+(x.state!=="CLOSED_BY_WORKER"?'<button class="btn secondary" onclick="closeWorkerHelp(\''+escapeHtml(x.id)+'\')">Close my request</button>':'<span class="pill">Closed by you</span>')+'<span class="pill blue">'+escapeHtml(x.truth_state)+'</span></div>').join("<hr>")}
 async function submitWorkerHelp(){try{await api("/api/worker/help-requests",{method:"POST",body:JSON.stringify({blocker:document.getElementById("help-blocker").value,details:document.getElementById("help-details").value,urgency:document.getElementById("help-urgency").value})});document.getElementById("help-details").value="";await loadWorkerHelp()}catch(e){alert(e.message)}}
+async function closeWorkerHelp(id){try{await api("/api/worker/help-requests/"+id+"/close",{method:"POST",body:"{}"});await loadWorkerHelp()}catch(e){alert(e.message)}}
+async function reviewHelpRequest(id,state){try{const input=document.getElementById("help-update-"+id);await api("/api/admin/help-requests/"+id,{method:"PATCH",body:JSON.stringify({state,worker_visible_update:input?input.value:""})});await loadAdmin()}catch(e){alert(e.message)}}
 async function loadNext(target){const n=await api("/api/next-action");document.getElementById(target).innerHTML='<strong>'+n.title+'</strong><div class="muted">'+n.detail+'</div><div style="margin-top:10px"><span class="pill blue">'+n.stage.replaceAll("_"," ")+'</span></div>'}
 async function loginAs(name){try{const b=await api("/api/login",{method:"POST",body:JSON.stringify({identifier:name,password:"TradeDemo123!"})});token=b.session_token;role=b.roles[0];user=name;document.getElementById("session").innerHTML="<strong>"+b.name+"</strong><br>"+role;const map={WORKER:"worker",EMPLOYER:"employer",CUSTOMER:"customer",ADMIN:"admin"};show(map[role]);if(role==="WORKER")loadWorker();if(role==="EMPLOYER")loadEmployer();if(role==="ADMIN")loadAdmin()}catch(e){document.getElementById("session").textContent=e.message}}
 async function loadWorker(){await loadNext("worker-next");await loadWorkerReceipt();await loadWorkerHelp();const b=await api("/api/opportunities");document.getElementById("opps").innerHTML=b.items.map(o=>'<div class="item"><div class="row"><span class="pill '+(o.will_train?'green':'blue')+'">'+o.status+'</span><span class="pill">'+o.last_confirmed+'</span></div><strong>'+o.title+'</strong><div class="muted">'+o.employer+' · '+o.location+' · '+o.pay+'</div><div style="margin-top:10px"><span class="pill gold">'+o.fit+'</span></div><button class="btn" onclick="requestIntro(\''+o.id+'\')">Request introduction</button></div>').join("");await loadWorkerConv()}
@@ -586,7 +629,7 @@ async function sendMsg(conv,input){const el=document.getElementById(input);if(!e
 async function proposeMeeting(conv){await api("/api/meetings",{method:"POST",body:JSON.stringify({conversation_id:conv,start_at:"Tomorrow 10:00 AM",end_at:"Tomorrow 10:30 AM"})});await loadNext("employer-next");alert("Interview proposed")}
 async function acceptMeeting(id){await api("/api/meetings/"+id+"/accept",{method:"POST",body:"{}"});await loadNext("worker-next");await loadWorkerConv()}
 async function submitCustomer(){const b=await api("/api/customer/requests",{method:"POST",body:JSON.stringify({service_category:document.getElementById("service").value,description:document.getElementById("desc").value,location_text:document.getElementById("loc").value})});document.getElementById("customer-status").innerHTML='<div class="item"><strong>'+b.state+'</strong><div class="muted">Matched business: '+b.matched_business+'</div><span class="pill blue">'+b.truth_state+'</span></div>'}
-async function loadAdmin(){const b=await api("/api/admin/control-tower");document.getElementById("metrics").innerHTML=Object.entries(b.counts).map(([k,v])=>'<div class="item"><div class="metric">'+v+'</div><div class="muted">'+k.replaceAll("_"," ")+'</div></div>').join("");const q=await api("/api/admin/help-requests");document.getElementById("admin-help").innerHTML=q.items.length?q.items.map(x=>'<div class="item"><strong>'+escapeHtml(x.worker_name)+'</strong><div class="muted">'+escapeHtml(x.blocker.replaceAll("_"," "))+' · '+escapeHtml(x.urgency.replaceAll("_"," "))+' · '+escapeHtml(x.state)+'</div><p>'+escapeHtml(x.details||"No additional details.")+'</p><span class="pill blue">'+escapeHtml(x.truth_state)+'</span></div>').join(""):'<div class="item muted">No worker help requests recorded.</div>'}
+async function loadAdmin(){const b=await api("/api/admin/control-tower");document.getElementById("metrics").innerHTML=Object.entries(b.counts).map(([k,v])=>'<div class="item"><div class="metric">'+v+'</div><div class="muted">'+k.replaceAll("_"," ")+'</div></div>').join("");const q=await api("/api/admin/help-requests");document.getElementById("admin-help").innerHTML=q.items.length?q.items.map(x=>'<div class="item"><strong>'+escapeHtml(x.worker_name)+'</strong><div class="muted">'+escapeHtml(x.blocker.replaceAll("_"," "))+' · '+escapeHtml(x.urgency.replaceAll("_"," "))+' · '+escapeHtml(x.state)+'</div><p>'+escapeHtml(x.details||"No additional details.")+'</p>'+(x.worker_visible_update?'<div class="status">'+escapeHtml(x.worker_visible_update)+'</div>':'')+(x.state!=="CLOSED_BY_WORKER"?'<input id="help-update-'+escapeHtml(x.id)+'" placeholder="Optional worker-visible update" maxlength="500"><button class="btn secondary" onclick="reviewHelpRequest(\''+escapeHtml(x.id)+'\',\'IN_REVIEW\')">Mark in review</button><button class="btn gold" onclick="reviewHelpRequest(\''+escapeHtml(x.id)+'\',\'WAITING_ON_WORKER\')">Ask worker for info</button>':'<span class="pill">Closed by worker</span>')+'<span class="pill blue">'+escapeHtml(x.truth_state)+'</span></div>').join(""):'<div class="item muted">No worker help requests recorded.</div>'}
 loginAs("jordan");
 </script></body></html>"""
 
