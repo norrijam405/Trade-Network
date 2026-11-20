@@ -446,3 +446,61 @@ def test_worker_can_close_only_their_own_help_request():
     assert closed.status_code == 200
     assert closed.json()["state"] == "CLOSED_BY_WORKER"
     assert closed.json()["resolution_authority"] == "NONE"
+
+def test_worker_can_reply_to_admin_follow_up_and_return_request_to_review_queue():
+    worker = login("jordan")
+    admin = login("admin")
+    employer = login("owner")
+    request = client.post(
+        "/api/worker/help-requests",
+        headers=auth(worker),
+        json={"blocker": "TRANSPORT", "details": "Fictional schedule and transport conflict."},
+    ).json()
+
+    waiting = client.patch(
+        f"/api/admin/help-requests/{request['id']}",
+        headers=auth(admin),
+        json={"state": "WAITING_ON_WORKER", "worker_visible_update": "Please confirm which shifts you can reach."},
+    )
+    assert waiting.status_code == 200
+    next_action = client.get("/api/next-action", headers=auth(worker))
+    assert next_action.status_code == 200
+    assert next_action.json()["code"] == "RESPOND_TO_HELP_REQUEST"
+
+    denied = client.post(
+        f"/api/worker/help-requests/{request['id']}/respond",
+        headers=auth(employer),
+        json={"message": "Fictional response."},
+    )
+    assert denied.status_code == 403
+
+    blank = client.post(
+        f"/api/worker/help-requests/{request['id']}/respond",
+        headers=auth(worker),
+        json={"message": "   "},
+    )
+    assert blank.status_code == 422
+
+    reply = client.post(
+        f"/api/worker/help-requests/{request['id']}/respond",
+        headers=auth(worker),
+        json={"message": "I can reach the Tuesday and Thursday shifts."},
+    )
+    assert reply.status_code == 200
+    assert reply.json()["state"] == "OPEN"
+    assert reply.json()["resolution_authority"] == "NONE"
+    assert reply.json()["worker_responses"][-1]["truth_state"] == "SUPPORTED"
+    assert reply.json()["worker_responses"][-1]["message"] == "I can reach the Tuesday and Thursday shifts."
+
+    duplicate = client.post(
+        f"/api/worker/help-requests/{request['id']}/respond",
+        headers=auth(worker),
+        json={"message": "I can reach the Tuesday and Thursday shifts."},
+    )
+    assert duplicate.status_code == 409
+
+    admin_queue = client.get("/api/admin/help-requests", headers=auth(admin))
+    assert admin_queue.status_code == 200
+    assert admin_queue.json()["items"][0]["worker_responses"][-1]["message"] == "I can reach the Tuesday and Thursday shifts."
+    assert client.get("/api/next-action", headers=auth(worker)).json()["code"] != "RESPOND_TO_HELP_REQUEST"
+
